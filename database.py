@@ -18,6 +18,8 @@ class UserSettings:
     units: str = "км / л"
     car_name: str = "Моє авто"
     extended_history: bool = True
+    telegram_username: str | None = None
+    telegram_full_name: str | None = None
 
 
 @dataclass
@@ -42,7 +44,6 @@ class RefuelRecord:
     station_name: str | None
     full_tank: bool
     note: str | None
-    fuel_product_name: str | None = None
     car_id: int | None = None
 
 
@@ -82,7 +83,6 @@ def _row_to_refuel(row: aiosqlite.Row) -> RefuelRecord:
         station_name=row["station_name"],
         full_tank=bool(row["full_tank"]),
         note=row["note"],
-        fuel_product_name=row["fuel_product_name"] if "fuel_product_name" in keys else None,
         car_id=row["car_id"] if "car_id" in keys else None,
     )
 
@@ -91,8 +91,6 @@ async def _migrate_refuels_table(db: aiosqlite.Connection) -> None:
     """Add optional refuel columns introduced after the initial schema."""
     cursor = await db.execute("PRAGMA table_info(refuels)")
     columns = {row[1] for row in await cursor.fetchall()}
-    if "fuel_product_name" not in columns:
-        await db.execute("ALTER TABLE refuels ADD COLUMN fuel_product_name TEXT")
     if "car_id" not in columns:
         await db.execute("ALTER TABLE refuels ADD COLUMN car_id INTEGER")
 
@@ -172,13 +170,17 @@ async def _migrate_legacy_cars(db: aiosqlite.Connection) -> None:
 
 
 async def _migrate_user_settings_table(db: aiosqlite.Connection) -> None:
-    """Add extended_history and bump PRAGMA user_version when needed."""
+    """Add extended_history, telegram profile fields, and bump PRAGMA user_version."""
     cursor = await db.execute("PRAGMA table_info(user_settings)")
     columns = {row[1] for row in await cursor.fetchall()}
     if "extended_history" not in columns:
         await db.execute(
             "ALTER TABLE user_settings ADD COLUMN extended_history INTEGER NOT NULL DEFAULT 1"
         )
+    if "telegram_username" not in columns:
+        await db.execute("ALTER TABLE user_settings ADD COLUMN telegram_username TEXT")
+    if "telegram_full_name" not in columns:
+        await db.execute("ALTER TABLE user_settings ADD COLUMN telegram_full_name TEXT")
 
     version_row = await db.execute("PRAGMA user_version")
     version = (await version_row.fetchone())[0]
@@ -214,8 +216,7 @@ async def init_db() -> None:
                 fuel_type TEXT NOT NULL,
                 station_name TEXT,
                 full_tank INTEGER NOT NULL DEFAULT 0,
-                note TEXT,
-                fuel_product_name TEXT
+                note TEXT
             )
             """
         )
@@ -229,8 +230,18 @@ async def init_db() -> None:
         await db.commit()
 
 
-async def ensure_user(user_id: int) -> UserSettings:
-    """Ensure default settings and at least one car exist for the user."""
+async def ensure_user(
+    user_id: int,
+    *,
+    username: str | None = None,
+    full_name: str | None = None,
+    update_profile: bool = False,
+) -> UserSettings:
+    """Ensure default settings and at least one car exist for the user.
+
+    When update_profile=True, refresh telegram_username / telegram_full_name
+    from the latest Telegram profile (values may be None if hidden/unset).
+    """
     async with aiosqlite.connect(DATABASE_PATH) as db:
         await db.execute(
             """
@@ -239,10 +250,35 @@ async def ensure_user(user_id: int) -> UserSettings:
             """,
             (user_id,),
         )
+        if update_profile:
+            await db.execute(
+                """
+                UPDATE user_settings
+                SET telegram_username = ?, telegram_full_name = ?
+                WHERE user_id = ?
+                """,
+                (username, full_name, user_id),
+            )
         await db.commit()
 
     await _ensure_default_car(user_id)
     return await _get_user_settings(user_id)
+
+
+async def ensure_tg_user(tg_user: Any) -> UserSettings:
+    """Upsert user settings and store Telegram display name / @username."""
+    username = getattr(tg_user, "username", None) or None
+    full_name = getattr(tg_user, "full_name", None) or None
+    if full_name is not None:
+        full_name = str(full_name).strip() or None
+    if username is not None:
+        username = str(username).strip() or None
+    return await ensure_user(
+        int(tg_user.id),
+        username=username,
+        full_name=full_name,
+        update_profile=True,
+    )
 
 
 async def _ensure_default_car(user_id: int) -> None:
@@ -268,6 +304,8 @@ async def _get_user_settings(user_id: int) -> UserSettings:
             units=row["units"],
             car_name=row["car_name"],
             extended_history=bool(row["extended_history"]) if "extended_history" in keys else True,
+            telegram_username=row["telegram_username"] if "telegram_username" in keys else None,
+            telegram_full_name=row["telegram_full_name"] if "telegram_full_name" in keys else None,
         )
 
 
@@ -484,7 +522,6 @@ async def add_refuel(
     fuel_type: str,
     station_name: str | None,
     full_tank: bool,
-    fuel_product_name: str | None = None,
     note: str | None = None,
 ) -> int:
     """Insert a refuel record and return its row id."""
@@ -494,9 +531,8 @@ async def add_refuel(
             """
             INSERT INTO refuels (
                 user_id, car_id, date, odometer_km, liters, price_per_liter,
-                total_price, fuel_type, station_name, full_tank, note,
-                fuel_product_name
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                total_price, fuel_type, station_name, full_tank, note
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 user_id,
@@ -510,11 +546,60 @@ async def add_refuel(
                 station_name,
                 int(full_tank),
                 note,
-                fuel_product_name,
             ),
         )
         await db.commit()
         return cursor.lastrowid  # type: ignore[return-value]
+
+
+async def add_refuels_batch(
+    user_id: int,
+    car_id: int,
+    items: list[dict[str, Any]],
+) -> int:
+    """Insert many refuel records in one transaction. Return inserted count.
+
+    Each item must contain: refuel_date, odometer_km, liters, price_per_liter,
+    total_price, fuel_type; optional station_name, full_tank, note.
+    """
+    if not items:
+        return 0
+
+    rows: list[tuple[Any, ...]] = []
+    for item in items:
+        refuel_date = item["refuel_date"]
+        if isinstance(refuel_date, str):
+            date_str = refuel_date[:10]
+        else:
+            date_str = refuel_date.strftime("%Y-%m-%d")
+        rows.append(
+            (
+                user_id,
+                car_id,
+                date_str,
+                float(item["odometer_km"]),
+                float(item["liters"]),
+                float(item["price_per_liter"]),
+                float(item["total_price"]),
+                str(item["fuel_type"]),
+                item.get("station_name"),
+                int(bool(item.get("full_tank", False))),
+                item.get("note"),
+            )
+        )
+
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.executemany(
+            """
+            INSERT INTO refuels (
+                user_id, car_id, date, odometer_km, liters, price_per_liter,
+                total_price, fuel_type, station_name, full_tank, note
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        await db.commit()
+    return len(rows)
 
 
 async def get_last_refuel(
@@ -529,7 +614,7 @@ async def get_last_refuel(
                 """
                 SELECT * FROM refuels
                 WHERE user_id = ? AND car_id = ? AND id != ?
-                ORDER BY date DESC, id DESC
+                ORDER BY date DESC, odometer_km DESC, id DESC
                 LIMIT 1
                 """,
                 (user_id, car_id, exclude_id),
@@ -539,7 +624,7 @@ async def get_last_refuel(
                 """
                 SELECT * FROM refuels
                 WHERE user_id = ? AND car_id = ?
-                ORDER BY date DESC, id DESC
+                ORDER BY date DESC, odometer_km DESC, id DESC
                 LIMIT 1
                 """,
                 (user_id, car_id),
@@ -581,7 +666,7 @@ async def get_refuels_page(
             """
             SELECT * FROM refuels
             WHERE user_id = ? AND car_id = ?
-            ORDER BY date DESC, id DESC
+            ORDER BY date DESC, odometer_km DESC, id DESC
             LIMIT ? OFFSET ?
             """,
             (user_id, car_id, per_page, offset),
@@ -600,14 +685,26 @@ async def count_refuels(user_id: int, car_id: int) -> int:
         return row[0] if row else 0
 
 
-async def get_all_refuels(user_id: int, car_id: int) -> list[RefuelRecord]:
+async def get_all_refuels(
+    user_id: int,
+    car_id: int,
+    *,
+    ascending: bool = True,
+) -> list[RefuelRecord]:
+    """Return all refuels for a car.
+
+    ascending=True  — oldest first (stats / previous-entry map).
+    ascending=False — newest first (history-aligned export).
+    Secondary keys: odometer_km, then id.
+    """
+    order = "ASC" if ascending else "DESC"
     async with aiosqlite.connect(DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
-            """
+            f"""
             SELECT * FROM refuels
             WHERE user_id = ? AND car_id = ?
-            ORDER BY date ASC, id ASC
+            ORDER BY date {order}, odometer_km {order}, id {order}
             """,
             (user_id, car_id),
         )

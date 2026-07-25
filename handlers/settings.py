@@ -1,13 +1,15 @@
-"""Handlers for user settings (currency, extended history, etc.)."""
+"""Handlers for user settings (currency, extended history, AI import entry)."""
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 import database as db
 from handlers.callback_guard import safe_callback, show_or_edit
+from handlers.messages import EXTENDED_HISTORY_HINT
 from keyboards.main_menu import (
     MENU_SETTINGS,
+    SETTINGS_BACK,
     SETTINGS_CURRENCY,
     SETTINGS_EXTENDED_HISTORY,
     settings_keyboard,
@@ -20,21 +22,27 @@ router = Router()
 CURRENCIES = ["грн", "₴", "USD", "EUR"]
 
 
+def _settings_text(settings: db.UserSettings, active_name: str) -> str:
+    ext_label = "увімкнено" if settings.extended_history else "вимкнено"
+    return (
+        "⚙️ <b>Налаштування</b>\n\n"
+        "Тут можна змінити авто, валюту та вигляд історії, "
+        "а також імпортувати старі заправки через AI.\n\n"
+        f"🚗 Активне авто: <b>{html_escape(active_name)}</b>\n"
+        f"💱 Валюта: <b>{settings.currency}</b>\n"
+        f"📐 Одиниці: <b>{settings.units}</b>\n"
+        f"📊 Розширена історія: <b>{ext_label}</b>\n\n"
+        f"<i>{EXTENDED_HISTORY_HINT}</i>"
+    )
+
+
 async def _show_settings(target: Message, user_id: int, *, edit: bool = False) -> None:
     """Display the settings screen with current user preferences."""
     settings = await db.ensure_user(user_id)
     active = await db.get_active_car(user_id)
-    ext_label = "✅ Увімкнено" if settings.extended_history else "❌ Вимкнено"
-    text = (
-        "⚙️ <b>Налаштування</b>\n\n"
-        f"🚗 Активне авто: <b>{html_escape(active.name)}</b>\n"
-        f"💱 Валюта: <b>{settings.currency}</b>\n"
-        f"📐 Одиниці: <b>{settings.units}</b>\n"
-        f"📊 Розширена історія: <b>{ext_label}</b>"
-    )
     await show_or_edit(
         target,
-        text,
+        _settings_text(settings, active.name),
         edit=edit,
         reply_markup=settings_keyboard(extended_history=settings.extended_history),
     )
@@ -43,7 +51,16 @@ async def _show_settings(target: Message, user_id: int, *, edit: bool = False) -
 @router.callback_query(F.data == MENU_SETTINGS)
 @safe_callback
 async def callback_settings(callback: CallbackQuery, state: FSMContext) -> None:
-    """Show the settings screen from the main menu."""
+    """Show the settings screen from the main menu or after AI import."""
+    await state.clear()
+    await db.ensure_tg_user(callback.from_user)
+    await callback.answer()
+    await _show_settings(callback.message, callback.from_user.id, edit=True)
+
+
+@router.callback_query(F.data == SETTINGS_BACK)
+@safe_callback
+async def callback_settings_back(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await callback.answer()
     await _show_settings(callback.message, callback.from_user.id, edit=True)
@@ -55,21 +72,19 @@ async def callback_toggle_extended_history(callback: CallbackQuery, state: FSMCo
     settings = await db.ensure_user(callback.from_user.id)
     new_value = not settings.extended_history
     await db.update_user_settings(callback.from_user.id, extended_history=new_value)
-    label = "увімкнено" if new_value else "вимкнено"
-    await callback.answer(f"Розширена історія {label}")
+    state_word = "увімкнено" if new_value else "вимкнено"
+    await callback.answer(f"Розширена історія {state_word}")
     await _show_settings(callback.message, callback.from_user.id, edit=True)
 
 
 @router.callback_query(F.data == SETTINGS_CURRENCY)
 @safe_callback
 async def callback_settings_currency(callback: CallbackQuery, state: FSMContext) -> None:
-    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-
     buttons = [
         [InlineKeyboardButton(text=c, callback_data=f"settings:cur:{c}")]
         for c in CURRENCIES
     ]
-    buttons.append([InlineKeyboardButton(text="🏠 Головне меню", callback_data="menu:home")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=SETTINGS_BACK)])
 
     await callback.answer()
     await safe_edit_text(

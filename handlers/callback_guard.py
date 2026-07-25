@@ -11,7 +11,7 @@ from typing import Any, Callable, TypeVar
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
-from handlers.messages import WELCOME_TEXT
+from handlers.messages import MAIN_MENU_TEXT
 from keyboards.main_menu import MENU_HOME, main_menu_keyboard
 from keyboards.utils import safe_edit_text, show_main_menu
 
@@ -107,7 +107,7 @@ def safe_callback(handler: F) -> F:
                     state: FSMContext | None = kwargs.get("state")
                     if state is not None:
                         await state.clear()
-                    await show_main_menu(callback, WELCOME_TEXT)
+                    await show_main_menu(callback, MAIN_MENU_TEXT)
                     await callback.answer()
                     return None
                 except Exception:

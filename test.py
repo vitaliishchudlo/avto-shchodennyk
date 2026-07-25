@@ -93,14 +93,14 @@ def parse_date(value: str) -> str:
     return f"{full_year}-{int(month):02d}-{int(day):02d}"
 
 
-def map_fuel_product(excel_fuel: str) -> tuple[str, str, str]:
-    """Excel FUEL TYPE -> (station_name, fuel_type, fuel_product_name)."""
+def map_fuel_name(excel_fuel: str) -> str:
+    """Excel FUEL TYPE -> single fuel_type value."""
     key = excel_fuel.strip().upper()
     if "PULLS" in key:
-        return "ОККО", "Бензин", "Pulls 95"
+        return "Pulls 95"
     if "UKRNAFTA" in key or "УКРНАФТА" in key:
-        return "УКРНАФТА", "Бензин", "А-95"
-    return "ОККО", "Бензин", "A-95 Євро"
+        return "А-95"
+    return excel_fuel.strip() or "А-95"
 
 
 def build_records() -> list[dict]:
@@ -110,7 +110,7 @@ def build_records() -> list[dict]:
         liters = parse_liters(liters_raw)
         total_price = parse_total_price(total_raw)
         price_per_liter = round(total_price / liters, 2)
-        station_name, fuel_type, fuel_product_name = map_fuel_product(fuel_excel)
+        # LOCATION in Excel is a city — not stored as АЗС
         records.append(
             {
                 "date": parse_date(date_raw),
@@ -118,9 +118,8 @@ def build_records() -> list[dict]:
                 "liters": liters,
                 "price_per_liter": price_per_liter,
                 "total_price": total_price,
-                "fuel_type": fuel_type,
-                "station_name": station_name,
-                "fuel_product_name": fuel_product_name,
+                "fuel_type": map_fuel_name(fuel_excel),
+                "station_name": None,
             }
         )
     return records
@@ -142,7 +141,7 @@ def build_insert_sql(records: list[dict]) -> str:
         lines.append(
             "INSERT INTO refuels ("
             "user_id, car_id, date, odometer_km, liters, price_per_liter, "
-            "total_price, fuel_type, station_name, full_tank, note, fuel_product_name"
+            "total_price, fuel_type, station_name, full_tank, note"
             ") VALUES ("
             f"{USER_ID}, "
             f"{CAR_ID}, "
@@ -154,8 +153,7 @@ def build_insert_sql(records: list[dict]) -> str:
             f"{sql_literal(rec['fuel_type'])}, "
             f"{sql_literal(rec['station_name'])}, "
             "1, "
-            "NULL, "
-            f"{sql_literal(rec['fuel_product_name'])}"
+            "NULL"
             ");"
         )
     return "\n".join(lines)

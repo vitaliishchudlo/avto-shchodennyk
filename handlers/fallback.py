@@ -4,26 +4,22 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
+from handlers.messages import FALLBACK_TEXT, UNKNOWN_COMMAND_TEXT
 from keyboards.main_menu import main_menu_keyboard
 
 router = Router()
-
-FALLBACK_TEXT = (
-    "Я тебе почув 🙂\n"
-    "Щоб додати заправку або переглянути статистику, скористайся меню нижче."
-)
-
-UNKNOWN_COMMAND_TEXT = (
-    "🤔 Не знаю такої команди.\n\n"
-    "Скористайся /help або меню нижче."
-)
 
 
 def _is_fsm_active(state_name: str | None) -> bool:
     """Return True when an FSM wizard is in progress and fallback should be suppressed."""
     if not state_name:
         return False
-    return state_name.startswith("AddFuelStates:") or state_name.startswith("SettingsStates:")
+    return state_name.startswith((
+        "AddFuelStates:",
+        "SettingsStates:",
+        "CarStates:",
+        "ImportStates:",
+    ))
 
 
 @router.message(F.text.startswith("/"))

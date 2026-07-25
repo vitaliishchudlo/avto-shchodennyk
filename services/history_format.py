@@ -52,11 +52,8 @@ def build_prev_map(all_refuels: list[RefuelRecord]) -> dict[int, RefuelRecord | 
 
 
 def _fuel_line(record: RefuelRecord) -> str:
-    """Format fuel type and optional product name as an HTML line."""
-    line = html_escape(record.fuel_type)
-    if record.fuel_product_name:
-        line = f"{html_escape(record.fuel_type)} — <b>{html_escape(record.fuel_product_name)}</b>"
-    return line
+    """Format fuel name as an HTML line."""
+    return f"<b>{html_escape(record.fuel_type)}</b>"
 
 
 def format_trip_analysis_lines(
@@ -135,15 +132,18 @@ def format_trip_from_previous_lines(
 
 def _basic_record_lines(record: RefuelRecord, currency: str) -> list[str]:
     """Core field lines for a single fuel entry (date, station, fuel, amounts)."""
-    station = html_escape(record.station_name or "—")
-    return [
+    lines = [
         f"📅 {fmt_date(record.date)}",
-        f"📍 <b>{station}</b>",
-        _fuel_line(record),
+    ]
+    if record.station_name:
+        lines.append(f"⛽ <b>{html_escape(record.station_name)}</b>")
+    lines.extend([
+        f"🧾 {_fuel_line(record)}",
         f"🔢 {fmt_num(record.liters)} л",
         f"💵 {fmt_num(record.price_per_liter)} {currency}/л",
         f"💰 {fmt_num(record.total_price, 0)} {currency}",
-    ]
+    ])
+    return lines
 
 
 def format_history_record(
@@ -249,19 +249,22 @@ def format_last_refuel(record: RefuelRecord, previous: RefuelRecord | None, curr
     Returns:
         Multi-line HTML string for the last-refuel view.
     """
-    station = record.station_name or "—"
+    station = record.station_name
     full_tank = "Так ✅" if record.full_tank else "Ні ❌"
 
     lines = [
         "⛽ <b>Остання заправка</b>\n",
         f"📅 Дата: {fmt_date(record.date)}",
-        f"📍 АЗС: <b>{html_escape(station)}</b>",
+    ]
+    if station:
+        lines.append(f"⛽ АЗС: <b>{html_escape(station)}</b>")
+    lines.extend([
         f"🧾 Пальне: {_fuel_line(record)}",
         f"🔢 Літри: {fmt_num(record.liters)} л",
         f"💰 Сума: {fmt_num(record.total_price, 0)} {currency}",
         f"🚗 Пробіг: {fmt_num(record.odometer_km, 0)} км",
         f"💵 Ціна/л: {fmt_num(record.price_per_liter)} {currency}",
         f"🛢 Повний бак: {full_tank}",
-    ]
+    ])
     lines.extend(format_trip_analysis_lines(record, previous, currency))
     return "\n".join(lines)

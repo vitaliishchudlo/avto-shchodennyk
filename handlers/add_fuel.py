@@ -11,7 +11,7 @@ from aiogram.types import CallbackQuery, Message
 
 import database as db
 from database import RefuelRecord
-from handlers.messages import WELCOME_TEXT
+from handlers.messages import MAIN_MENU_TEXT
 from keyboards.cars import (
     CAR_PICK_PREFIX,
     FUEL_CAR_CHANGE,
@@ -187,32 +187,32 @@ async def _ask_station(target: Message, state: FSMContext, *, edit: bool = False
 
 
 async def _ask_fuel_type(target: Message, state: FSMContext, *, edit: bool = False) -> None:
-    """Show step 4: fuel type selection."""
+    """Show step 4: fuel category (filters the product list)."""
     await send_step(
         target,
         state,
-        _step(4, "⛽ Обери тип пального."),
+        _step(4, "⛽ Обери категорію пального."),
         edit=edit,
         reply_markup=fuel_type_keyboard(),
     )
 
 
 async def _ask_fuel_product(target: Message, state: FSMContext, *, edit: bool = False) -> None:
-    """Show step 5: specific fuel product selection or manual entry."""
+    """Show step 5: specific fuel name (stored in fuel_type)."""
     data = await state.get_data()
     station = data.get("station_name")
-    fuel_type = data["fuel_type"]
-    products = get_products(station, fuel_type)
+    category = data["fuel_category"]
+    products = get_products(station, category)
     await state.update_data(_product_list=products)
 
     if products:
-        text = _step(5, "🧾 Обери конкретну назву пального.")
+        text = _step(5, "🧾 Обери пальне.")
         markup = fuel_product_keyboard(products)
     else:
         text = _step(
             5,
-            "Для цієї АЗС немає готового списку пального.\n"
-            "Можеш ввести назву вручну або пропустити.",
+            "Для цієї АЗС немає готового списку.\n"
+            "Введи назву пального вручну (наприклад Pulls 95, ДП Євро).",
         )
         markup = fuel_product_manual_keyboard()
 
@@ -273,7 +273,6 @@ async def _show_confirm(
 def _format_confirmation(data: dict, currency: str) -> str:
     """Build HTML summary text for the confirmation screen."""
     station = data.get("station_name") or "—"
-    product = data.get("fuel_product_name") or "—"
     full_tank = "Так ✅" if data.get("full_tank") else "Ні ❌"
     refuel_date = data.get("refuel_date")
     date_str = fmt_date(refuel_date) if refuel_date else "—"
@@ -281,9 +280,8 @@ def _format_confirmation(data: dict, currency: str) -> str:
     return (
         f"📅 Дата: {date_str}\n"
         f"🚗 Пробіг: {fmt_num(data['odometer_km'], 0)} км\n"
-        f"📍 АЗС: <b>{html_escape(station)}</b>\n"
-        f"⛽ Тип: <b>{html_escape(data['fuel_type'])}</b>\n"
-        f"🧾 Пальне: <b>{html_escape(product)}</b>\n"
+        f"⛽ АЗС: <b>{html_escape(station)}</b>\n"
+        f"🧾 Пальне: <b>{html_escape(data['fuel_type'])}</b>\n"
         f"🔢 Літри: {fmt_num(data['liters'])} л\n"
         f"💰 Сума: {fmt_num(data['total_price'], 0)} {currency}\n"
         f"🛢 Повний бак: {full_tank}"
@@ -293,17 +291,15 @@ def _format_confirmation(data: dict, currency: str) -> str:
 def _format_save_summary(data: dict, currency: str, previous: RefuelRecord | None) -> str:
     """Build HTML summary shown after a refuel is saved, including trip stats."""
     station = data.get("station_name") or "—"
-    product = data.get("fuel_product_name")
     lines = [
         "Заправку збережено ✅\n",
         f"📅 Дата: {fmt_date(data['refuel_date'])}",
         f"🔢 Літри: {fmt_num(data['liters'])} л",
         f"💰 Сума: {fmt_num(data['total_price'], 0)} {currency}",
-        f"📍 АЗС: <b>{html_escape(station)}</b>",
+        f"⛽ АЗС: <b>{html_escape(station)}</b>",
+        f"🧾 Пальне: <b>{html_escape(data['fuel_type'])}</b>",
+        f"🚗 Пробіг: {fmt_num(data['odometer_km'], 0)} км",
     ]
-    if product:
-        lines.append(f"🧾 Пальне: <b>{html_escape(product)}</b>")
-    lines.append(f"🚗 Пробіг: {fmt_num(data['odometer_km'], 0)} км")
 
     if previous:
         current = RefuelRecord(
@@ -318,7 +314,6 @@ def _format_save_summary(data: dict, currency: str, previous: RefuelRecord | Non
             station_name=data.get("station_name"),
             full_tank=data.get("full_tank", False),
             note=None,
-            fuel_product_name=data.get("fuel_product_name"),
         )
         trip = calc_trip_stats(current, previous)
         if trip:
@@ -344,13 +339,13 @@ def _format_save_summary(data: dict, currency: str, previous: RefuelRecord | Non
 @router.message(Command("add"))
 async def cmd_add(message: Message, state: FSMContext) -> None:
     """Handle /add — start the add-refuel wizard."""
-    await db.ensure_user(message.from_user.id)
+    await db.ensure_tg_user(message.from_user)
     await _start_add_flow(message, state, message.from_user.id)
 
 
 @router.callback_query(F.data == MENU_ADD)
 async def callback_add(callback: CallbackQuery, state: FSMContext) -> None:
-    await db.ensure_user(callback.from_user.id)
+    await db.ensure_tg_user(callback.from_user)
     await callback.answer()
     await _start_add_flow(callback.message, state, callback.from_user.id, previous=callback.message)
 
@@ -546,14 +541,14 @@ async def process_station_custom(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith(FUEL_TYPE_PREFIX), AddFuelStates.fuel_type)
 async def callback_fuel_type(callback: CallbackQuery, state: FSMContext) -> None:
-    fuel_type = callback.data.removeprefix(FUEL_TYPE_PREFIX)
-    await state.update_data(fuel_type=fuel_type)
+    category = callback.data.removeprefix(FUEL_TYPE_PREFIX)
+    await state.update_data(fuel_category=category)
     await state.set_state(AddFuelStates.fuel_product)
     await callback.answer()
     await _ask_fuel_product(callback.message, state, edit=True)
 
 
-# --- Step 5: fuel product name ---
+# --- Step 5: fuel name (stored as fuel_type) ---
 
 @router.callback_query(
     F.data.startswith(FUEL_PRODUCT_PREFIX),
@@ -567,14 +562,15 @@ async def callback_fuel_product(callback: CallbackQuery, state: FSMContext) -> N
         await callback.answer()
         await safe_edit_text(
             callback.message,
-            _step(5, "✍️ Введи назву пального вручну."),
+            _step(5, "✍️ Введи назву пального вручну.\nНаприклад: Pulls 95, ДП Євро"),
             reply_markup=None,
             parse_mode="HTML",
         )
         return
 
     if suffix == "skip":
-        await state.update_data(fuel_product_name=None)
+        data = await state.get_data()
+        await state.update_data(fuel_type=data.get("fuel_category") or "Інше")
         await state.set_state(AddFuelStates.liters)
         await callback.answer()
         await _ask_liters(callback.message, state, edit=True)
@@ -588,7 +584,7 @@ async def callback_fuel_product(callback: CallbackQuery, state: FSMContext) -> N
         await callback.answer("Невідомий варіант", show_alert=True)
         return
 
-    await state.update_data(fuel_product_name=product)
+    await state.update_data(fuel_type=product)
     await state.set_state(AddFuelStates.liters)
     await callback.answer()
     await _ask_liters(callback.message, state, edit=True)
@@ -602,7 +598,7 @@ async def process_fuel_product_text(message: Message, state: FSMContext) -> None
         return
 
     await clear_tracked_prompt(message.bot, state)
-    await state.update_data(fuel_product_name=name)
+    await state.update_data(fuel_type=name)
     await state.set_state(AddFuelStates.liters)
     await _ask_liters(message, state)
 
@@ -614,7 +610,7 @@ async def process_fuel_product_custom(message: Message, state: FSMContext) -> No
         await message.answer("Введи назву пального.")
         return
 
-    await state.update_data(fuel_product_name=name)
+    await state.update_data(fuel_type=name)
     await state.set_state(AddFuelStates.liters)
     await _ask_liters(message, state)
 
@@ -729,7 +725,6 @@ async def callback_save(callback: CallbackQuery, state: FSMContext) -> None:
         fuel_type=data["fuel_type"],
         station_name=data.get("station_name"),
         full_tank=data.get("full_tank", False),
-        fuel_product_name=data.get("fuel_product_name"),
     )
 
     settings = await db.ensure_user(user_id)
@@ -751,7 +746,7 @@ async def callback_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer("Скасовано")
     await safe_edit_text(
         callback.message,
-        "❌ Додавання заправки скасовано.\n\n" + WELCOME_TEXT,
+        "❌ Додавання заправки скасовано.\n\n" + MAIN_MENU_TEXT,
         reply_markup=main_menu_keyboard(),
         parse_mode="HTML",
     )

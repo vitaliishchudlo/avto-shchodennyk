@@ -1,128 +1,50 @@
-"""Handlers for exporting refuel history to CSV."""
+"""Handlers for exporting refuel history to CSV (/export command)."""
 
-from aiogram import F, Router
-
+from aiogram import Router
 from aiogram.filters import Command
-
 from aiogram.fsm.context import FSMContext
-
-from aiogram.types import BufferedInputFile, CallbackQuery, Message
-
-
+from aiogram.types import BufferedInputFile, Message
 
 import database as db
-
-from handlers.callback_guard import safe_callback, show_or_edit
-
-from keyboards.main_menu import MENU_EXPORT, home_button_keyboard, main_menu_keyboard
-
+from keyboards.main_menu import history_empty_keyboard, home_button_keyboard
 from services.csv_export import csv_filename, export_refuels_to_csv
-
 from services.formatting import active_car_banner, code, html_escape
-
-
 
 router = Router()
 
-
-
-EMPTY_EXPORT_TEXT = "📁 Немає даних для експорту."
-
-
-
-
-
-async def _send_export(target: Message, user_id: int, *, edit: bool = False) -> None:
-
-    """Generate and send a CSV export for the active car's refuels."""
-    car = await db.get_active_car(user_id)
-
-    settings = await db.ensure_user(user_id)
-
-    refuels = await db.get_all_refuels(user_id, car.id)
-
-
-
-    if not refuels:
-
-        text = active_car_banner(car.name) + "\n" + EMPTY_EXPORT_TEXT
-
-        await show_or_edit(
-
-            target,
-
-            text,
-
-            edit=edit,
-
-            reply_markup=main_menu_keyboard(),
-
-        )
-
-        return
-
-
-
-    csv_data = export_refuels_to_csv(refuels, car_name=car.name)
-
-    filename = csv_filename(car.name)
-
-    document = BufferedInputFile(csv_data, filename=filename)
-
-
-
-    await target.answer_document(
-
-        document,
-
-        caption=(
-
-            f"📁 Експорт заправок для <b>{html_escape(car.name)}</b>\n"
-
-            f"Записів: {code(len(refuels))}"
-
-        ),
-
-        parse_mode="HTML",
-
-    )
-
-    await target.answer(
-
-        active_car_banner(car.name) + "\n📁 Експорт завершено",
-
-        reply_markup=home_button_keyboard(),
-
-        parse_mode="HTML",
-
-    )
-
-
-
+EMPTY_EXPORT_TEXT = "Немає даних для експорту."
 
 
 @router.message(Command("export"))
-
 async def cmd_export(message: Message, state: FSMContext) -> None:
-
-    """Handle /export — send refuel history as a CSV file."""
+    """Handle /export — send active car history as CSV (newest first)."""
     await state.clear()
+    user_id = message.from_user.id
+    car = await db.get_active_car(user_id)
+    refuels = await db.get_all_refuels(user_id, car.id, ascending=False)
 
-    await _send_export(message, message.from_user.id)
+    if not refuels:
+        await message.answer(
+            active_car_banner(car.name) + "\n" + EMPTY_EXPORT_TEXT,
+            reply_markup=history_empty_keyboard(),
+            parse_mode="HTML",
+        )
+        return
 
-
-
-
-
-@router.callback_query(F.data == MENU_EXPORT)
-
-@safe_callback
-
-async def callback_export(callback: CallbackQuery, state: FSMContext) -> None:
-
-    await state.clear()
-
-    await callback.answer()
-
-    await _send_export(callback.message, callback.from_user.id, edit=True)
-
+    document = BufferedInputFile(
+        export_refuels_to_csv(refuels, car_name=car.name),
+        filename=csv_filename(car.name),
+    )
+    await message.answer_document(
+        document,
+        caption=(
+            f"📁 Експорт для <b>{html_escape(car.name)}</b>\n"
+            f"Записів: {code(len(refuels))}"
+        ),
+        parse_mode="HTML",
+    )
+    await message.answer(
+        "Експорт готовий.",
+        reply_markup=home_button_keyboard(),
+        parse_mode="HTML",
+    )

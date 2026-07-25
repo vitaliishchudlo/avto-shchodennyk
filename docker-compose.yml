@@ -1,0 +1,14 @@
+services:
+  bot:
+    build: .
+    container_name: fuel-bot
+    restart: always
+    env_file:
+      - .env
+    environment:
+      DATABASE_PATH: /app/data/fuel_tracker.db
+    volumes:
+      - fuel_tracker_data:/app/data
+
+volumes:
+  fuel_tracker_data:

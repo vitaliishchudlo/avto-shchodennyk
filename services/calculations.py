@@ -41,7 +41,6 @@ class OverallStats:
     period_end: datetime | None
     most_common_station: str | None = None
     most_common_fuel_type: str | None = None
-    most_common_fuel_product: str | None = None
     avg_price_by_fuel_type: dict[str, float] = field(default_factory=dict)
 
 
@@ -240,7 +239,6 @@ def calc_overall_stats(refuels: list[RefuelRecord]) -> OverallStats:
 
     stations = [r.station_name for r in refuels if r.station_name]
     fuel_types = [r.fuel_type for r in refuels]
-    products = [r.fuel_product_name for r in refuels if r.fuel_product_name]
 
     return OverallStats(
         total_refuels=len(refuels),
@@ -258,7 +256,6 @@ def calc_overall_stats(refuels: list[RefuelRecord]) -> OverallStats:
         period_end=refuels[-1].date,
         most_common_station=_most_common(stations),
         most_common_fuel_type=_most_common(fuel_types),
-        most_common_fuel_product=_most_common(products),
         avg_price_by_fuel_type=_avg_price_by_type(refuels),
     )
 

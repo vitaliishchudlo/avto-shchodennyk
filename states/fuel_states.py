@@ -1,4 +1,4 @@
-"""FSM state groups for add-fuel, settings, and car management flows."""
+"""FSM state groups for add-fuel, settings, cars, and AI import flows."""
 
 from aiogram.fsm.state import State, StatesGroup
 
@@ -37,3 +37,13 @@ class CarStates(StatesGroup):
     rename_pick = State()
     rename_name = State()
     delete_pick = State()
+
+
+class ImportStates(StatesGroup):
+    """States for AI-assisted bulk import of refuel records."""
+
+    confirm_car = State()
+    car_pick = State()
+    await_payload = State()
+    clarify = State()
+    preview = State()

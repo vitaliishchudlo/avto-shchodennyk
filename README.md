@@ -7,11 +7,12 @@ Telegram-бот українською мовою для обліку запра
 ## Можливості
 
 - додавання заправки (пробіг, літри, ціна, тип пального, АЗС, примітки)
-- історія заправок з посторінковим переглядом
+- історія заправок з пагінацією (перша / попередня / наступна / остання)
+- експорт CSV з історії заправок
+- AI-імпорт заправок з CSV/Excel або тексту (у налаштуваннях)
 - статистика: витрата, вартість пробігу, загальні витрати
 - кілька авто: додавання, перейменування, перемикання, видалення
-- експорт історії в CSV
-- налаштування валюти та відображення історії
+- налаштування валюти та розширеної історії
 
 ## Команди
 
@@ -24,8 +25,46 @@ Telegram-бот українською мовою для обліку запра
 | `/last` | остання заправка |
 | `/delete_last` | видалити останній запис |
 | `/export` | експорт CSV |
+| `/import` | AI-імпорт заправок |
 | `/help` | довідка |
 
 ## Технології
 
-Python · [aiogram](https://docs.aiogram.dev/) 3 · SQLite · python-dotenv
+Python · [aiogram](https://docs.aiogram.dev/) 3 · SQLite · Google Gemini (імпорт) · python-dotenv
+
+## Docker (24/7 на сервері)
+
+Перед запуском створіть файл `.env` у корені проєкту:
+
+```env
+BOT_TOKEN=your_telegram_bot_token
+GEMINI_API_KEY=your_gemini_api_key
+```
+
+Ключ Gemini можна створити безкоштовно в [Google AI Studio](https://aistudio.google.com/apikey).
+
+Запуск:
+
+```bash
+docker compose up -d --build
+```
+
+Перевірка:
+
+```bash
+docker compose ps
+```
+
+Логи:
+
+```bash
+docker compose logs -f
+```
+
+Зупинка:
+
+```bash
+docker compose down
+```
+
+SQLite-база зберігається у Docker volume `fuel_tracker_data` (шлях `/app/data/fuel_tracker.db` через змінну `DATABASE_PATH`) і не зникає після перезапуску контейнера або сервера. Контейнер автоматично стартує знову завдяки `restart: always`.

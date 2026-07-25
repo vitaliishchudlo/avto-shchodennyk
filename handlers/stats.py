@@ -111,11 +111,9 @@ def _format_stats(stats, settings, car_name: str) -> str:
         )
 
     if stats.most_common_station:
-        lines.extend(["", f"📍 Найчастіша АЗС: <b>{html_escape(stats.most_common_station)}</b>"])
+        lines.extend(["", f"⛽ Найчастіша АЗС: <b>{html_escape(stats.most_common_station)}</b>"])
     if stats.most_common_fuel_type:
-        lines.append(f"🔧 Найчастіший тип: <b>{html_escape(stats.most_common_fuel_type)}</b>")
-    if stats.most_common_fuel_product:
-        lines.append(f"🧾 Найчастіше пальне: <b>{html_escape(stats.most_common_fuel_product)}</b>")
+        lines.append(f"🧾 Найчастіше пальне: <b>{html_escape(stats.most_common_fuel_type)}</b>")
 
     if stats.avg_price_by_fuel_type:
         lines.append("")
@@ -143,6 +141,7 @@ async def _delete_last_refuel(user_id: int) -> bool:
 async def cmd_stats(message: Message, state: FSMContext) -> None:
     """Handle /stats — show aggregate fuel statistics."""
     await state.clear()
+    await db.ensure_tg_user(message.from_user)
     await _show_stats(message, message.from_user.id)
 
 
@@ -150,6 +149,7 @@ async def cmd_stats(message: Message, state: FSMContext) -> None:
 @safe_callback
 async def callback_stats(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
+    await db.ensure_tg_user(callback.from_user)
     await callback.answer()
     await _show_stats(callback.message, callback.from_user.id, edit=True)
 
@@ -158,6 +158,7 @@ async def callback_stats(callback: CallbackQuery, state: FSMContext) -> None:
 async def cmd_last(message: Message, state: FSMContext) -> None:
     """Handle /last — show the most recent refuel."""
     await state.clear()
+    await db.ensure_tg_user(message.from_user)
     await _show_last(message, message.from_user.id)
 
 
@@ -165,6 +166,7 @@ async def cmd_last(message: Message, state: FSMContext) -> None:
 @safe_callback
 async def callback_last(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
+    await db.ensure_tg_user(callback.from_user)
     await callback.answer()
     await _show_last(callback.message, callback.from_user.id, edit=True)
 

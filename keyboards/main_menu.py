@@ -9,12 +9,24 @@ MENU_ADD = "menu:add"
 MENU_STATS = "menu:stats"
 MENU_HISTORY = "menu:history"
 MENU_LAST = "menu:last"
-MENU_EXPORT = "menu:export"
 MENU_SETTINGS = "menu:settings"
 MENU_HOME = "menu:home"
 
-HISTORY_PREV = "history:prev"
-HISTORY_NEXT = "history:next"
+SETTINGS_CARS = "settings:cars"
+SETTINGS_CURRENCY = "settings:currency"
+SETTINGS_EXTENDED_HISTORY = "settings:extended:toggle"
+SETTINGS_AI_IMPORT = "settings:ai_import"
+SETTINGS_BACK = "settings:back"
+
+IMPORT_CAR_CONFIRM = "import:car:yes"
+IMPORT_CAR_CHANGE = "import:car:change"
+IMPORT_CAR_PICK_PREFIX = "import:car:pick:"
+IMPORT_CONFIRM_SAVE = "import:save"
+IMPORT_CONFIRM_CANCEL = "import:cancel"
+
+HISTORY_GOTO = "hist:g:"
+HISTORY_NOOP = "hist:noop"
+HISTORY_EXPORT = "hist:exp"
 
 FUEL_DATE_TODAY = "fuel:date:today"
 FUEL_DATE_OTHER = "fuel:date:other"
@@ -30,14 +42,13 @@ FUEL_CONFIRM_SAVE = "fuel:save"
 FUEL_CONFIRM_CANCEL = "fuel:cancel"
 FUEL_CONFIRM_RESTART = "fuel:restart"
 
-SETTINGS_CARS = "settings:cars"
-SETTINGS_CURRENCY = "settings:currency"
-SETTINGS_EXTENDED_HISTORY = "settings:extended:toggle"
-SETTINGS_BACK = "settings:back"
-
 LAST_DELETE = "last:delete"
 LAST_DELETE_CONFIRM = "last:delete:yes"
 LAST_DELETE_CANCEL = "last:delete:no"
+
+# Backward-compatible aliases (old export/import menu callbacks)
+MENU_EXPORT = HISTORY_EXPORT
+MENU_IMPORT = SETTINGS_AI_IMPORT
 
 
 def _cancel_row() -> list[InlineKeyboardButton]:
@@ -51,14 +62,53 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="➕ Додати заправку", callback_data=MENU_ADD)],
             [
-                InlineKeyboardButton(text="📊 Статистика витрат", callback_data=MENU_STATS),
-                InlineKeyboardButton(text="📜 Історія заправок", callback_data=MENU_HISTORY),
+                InlineKeyboardButton(text="📊 Статистика", callback_data=MENU_STATS),
+                InlineKeyboardButton(text="📜 Історія", callback_data=MENU_HISTORY),
             ],
-            [
-                InlineKeyboardButton(text="⛽ Остання заправка", callback_data=MENU_LAST),
-                InlineKeyboardButton(text="📁 Експорт CSV", callback_data=MENU_EXPORT),
-            ],
+            [InlineKeyboardButton(text="⛽ Остання заправка", callback_data=MENU_LAST)],
             [InlineKeyboardButton(text="⚙️ Налаштування", callback_data=MENU_SETTINGS)],
+        ]
+    )
+
+
+def import_confirm_car_keyboard() -> InlineKeyboardMarkup:
+    """Confirm / change car before AI import."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Так", callback_data=IMPORT_CAR_CONFIRM),
+                InlineKeyboardButton(text="🔄 Змінити авто", callback_data=IMPORT_CAR_CHANGE),
+            ],
+            [InlineKeyboardButton(text="❌ Скасувати", callback_data=IMPORT_CONFIRM_CANCEL)],
+        ]
+    )
+
+
+def import_preview_keyboard() -> InlineKeyboardMarkup:
+    """Confirm or cancel an AI-mapped import batch."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Додати записи", callback_data=IMPORT_CONFIRM_SAVE)],
+            [InlineKeyboardButton(text="❌ Скасувати", callback_data=IMPORT_CONFIRM_CANCEL)],
+        ]
+    )
+
+
+def import_cancel_keyboard() -> InlineKeyboardMarkup:
+    """Single cancel button while waiting for import payload."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Скасувати", callback_data=IMPORT_CONFIRM_CANCEL)],
+        ]
+    )
+
+
+def import_done_keyboard() -> InlineKeyboardMarkup:
+    """After successful AI import: back to settings or main menu."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Налаштування", callback_data=MENU_SETTINGS)],
+            [InlineKeyboardButton(text="🏠 Головне меню", callback_data=MENU_HOME)],
         ]
     )
 
@@ -67,7 +117,7 @@ def home_button_keyboard() -> InlineKeyboardMarkup:
     """Build a keyboard with a single back-to-main-menu button."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🏠 Повернутись у головне меню", callback_data=MENU_HOME)],
+            [InlineKeyboardButton(text="🏠 Головне меню", callback_data=MENU_HOME)],
         ]
     )
 
@@ -77,7 +127,7 @@ def last_refuel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="⛔ Видалити останню", callback_data=LAST_DELETE)],
-            [InlineKeyboardButton(text="🏠 Повернутись у головне меню", callback_data=MENU_HOME)],
+            [InlineKeyboardButton(text="🏠 Головне меню", callback_data=MENU_HOME)],
         ]
     )
 
@@ -203,37 +253,56 @@ def confirm_keyboard() -> InlineKeyboardMarkup:
 
 
 def history_keyboard(page: int, total_pages: int) -> InlineKeyboardMarkup:
-    """Build pagination controls for the refuel history view."""
-    buttons: list[list[InlineKeyboardButton]] = []
-    nav_row: list[InlineKeyboardButton] = []
+    """Build history controls: first/prev/indicator/next/last + export + home.
 
-    if page > 0:
-        nav_row.append(
-            InlineKeyboardButton(text="⬅️ Назад", callback_data=f"{HISTORY_PREV}:{page - 1}")
-        )
-    if page < total_pages - 1:
-        nav_row.append(
-            InlineKeyboardButton(text="➡️ Далі", callback_data=f"{HISTORY_NEXT}:{page + 1}")
-        )
+    Always shows five nav buttons. Edge pages re-target the current page so
+    taps never error. Page indicator uses a no-op callback.
+    """
+    last_page = max(0, total_pages - 1)
+    prev_page = max(0, page - 1)
+    next_page = min(last_page, page + 1)
+    indicator = f"{page + 1} / {total_pages}"
 
-    if nav_row:
-        buttons.append(nav_row)
-    buttons.append([InlineKeyboardButton(text="🏠 Меню", callback_data=MENU_HOME)])
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(text="⏮", callback_data=f"{HISTORY_GOTO}0"),
+            InlineKeyboardButton(text="◀️", callback_data=f"{HISTORY_GOTO}{prev_page}"),
+            InlineKeyboardButton(text=indicator, callback_data=HISTORY_NOOP),
+            InlineKeyboardButton(text="▶️", callback_data=f"{HISTORY_GOTO}{next_page}"),
+            InlineKeyboardButton(text="⏭", callback_data=f"{HISTORY_GOTO}{last_page}"),
+        ],
+        [InlineKeyboardButton(text="📁 Експорт CSV", callback_data=HISTORY_EXPORT)],
+        [InlineKeyboardButton(text="🏠 Головне меню", callback_data=MENU_HOME)],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def history_empty_keyboard() -> InlineKeyboardMarkup:
+    """Keyboard when history has no records."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🏠 Головне меню", callback_data=MENU_HOME)],
+        ]
+    )
 
 
 def settings_keyboard(*, extended_history: bool = True) -> InlineKeyboardMarkup:
-    """Build the settings submenu with current extended-history status."""
-    ext_status = "✅ Увімкнено" if extended_history else "❌ Вимкнено"
+    """Build the settings submenu: cars, currency, toggles, rare AI import."""
+    ext_label = "Увімк." if extended_history else "Вимк."
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🚗 Авто", callback_data=SETTINGS_CARS)],
             [InlineKeyboardButton(text="💱 Валюта", callback_data=SETTINGS_CURRENCY)],
             [
                 InlineKeyboardButton(
-                    text=f"📊 Розширена історія: {ext_status}",
+                    text=f"📊 Розширена історія: {ext_label}",
                     callback_data=SETTINGS_EXTENDED_HISTORY,
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🤖 AI-імпорт заправок",
+                    callback_data=SETTINGS_AI_IMPORT,
                 )
             ],
             [InlineKeyboardButton(text="🏠 Головне меню", callback_data=MENU_HOME)],
