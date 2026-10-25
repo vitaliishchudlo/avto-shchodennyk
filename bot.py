@@ -14,6 +14,7 @@ from database import init_db
 from handlers import (
     add_fuel,
     add_photo,
+    archive,
     cars,
     export,
     fallback,
@@ -51,6 +52,7 @@ async def main() -> None:
     dp.include_router(stats.router)
     dp.include_router(export.router)
     dp.include_router(settings.router)
+    dp.include_router(archive.router)
     dp.include_router(fallback.router)
 
     logger.info("Бот запущено")

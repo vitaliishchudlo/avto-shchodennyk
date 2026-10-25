@@ -6,6 +6,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 import database as db
+from handlers.archive import format_year_ranges, hidden_years_banner
 from handlers.callback_guard import safe_callback, show_or_edit
 from keyboards.main_menu import (
     LAST_DELETE,
@@ -13,9 +14,12 @@ from keyboards.main_menu import (
     LAST_DELETE_CONFIRM,
     MENU_LAST,
     MENU_STATS,
+    STATS_PERIOD_ALL,
+    STATS_PERIOD_PREFIX,
     last_delete_confirm_keyboard,
     last_refuel_keyboard,
     main_menu_keyboard,
+    stats_keyboard,
 )
 from keyboards.utils import safe_edit_text
 from services.calculations import calc_full_tank_trips, calc_overall_stats
@@ -58,33 +62,68 @@ async def _show_last(target: Message, user_id: int, *, edit: bool = False) -> No
     await show_or_edit(target, text, edit=edit, reply_markup=last_refuel_keyboard())
 
 
-async def _show_stats(target: Message, user_id: int, *, edit: bool = False) -> None:
-    """Display aggregate fuel statistics for the active car."""
+async def _show_stats(
+    target: Message,
+    user_id: int,
+    *,
+    edit: bool = False,
+    year: int | None = None,
+) -> None:
+    """Display statistics for the active car.
+
+    Archived years are left out everywhere, the period switcher included.
+    year=None covers all visible years and is labelled with their real range
+    ("весь час" only when nothing is archived). Each period starts from zero:
+    only its own refuels are counted.
+    """
     car = await db.get_active_car(user_id)
     settings = await db.ensure_user(user_id)
-    refuels = await db.get_all_refuels(user_id, car.id)
-    stats = calc_overall_stats(refuels)
+    all_refuels = await db.get_all_refuels(user_id, car.id)
+    data_years = {r.date.year for r in all_refuels}
+    hidden = await db.get_hidden_years(car.id) & data_years
+    visible_years = sorted(data_years - hidden, reverse=True)
 
-    if stats.total_refuels == 0:
+    if not all_refuels:
         text = (
             active_car_banner(car.name)
             + "\n📭 Заправок ще немає.\n\nДодай першу заправку, щоб побачити статистику."
         )
-        keyboard = main_menu_keyboard()
+        await show_or_edit(target, text, edit=edit, reply_markup=main_menu_keyboard())
+        return
+
+    banner = active_car_banner(car.name) + hidden_years_banner(hidden)
+    all_label = format_year_ranges(set(visible_years)) if hidden else "Весь час"
+    keyboard = stats_keyboard(visible_years, year, all_label=all_label)
+
+    if not visible_years:
+        text = (
+            banner
+            + f"\n📊 <b>Статистика — {html_escape(car.name)}</b>\n\n"
+            "Усі роки приховано в архіві.\n"
+            "Показати їх можна в «⚙️ Налаштування» → «🗄 Архів років»."
+        )
+        await show_or_edit(target, text, edit=edit, reply_markup=keyboard)
+        return
+
+    if year not in visible_years:
+        year = None  # an archived year from an old button falls back to all visible years
+    if year is None:
+        refuels = [r for r in all_refuels if r.date.year not in hidden]
+        period = all_label.lower() if not hidden else all_label
     else:
-        text = active_car_banner(car.name) + "\n" + _format_stats(stats, settings, car.name)
-        from keyboards.main_menu import home_button_keyboard
+        refuels = [r for r in all_refuels if r.date.year == year]
+        period = f"{year} рік"
 
-        keyboard = home_button_keyboard()
-
+    keyboard = stats_keyboard(visible_years, year, all_label=all_label)
+    text = banner + "\n" + _format_stats(calc_overall_stats(refuels), settings, car.name, period)
     await show_or_edit(target, text, edit=edit, reply_markup=keyboard)
 
 
-def _format_stats(stats, settings, car_name: str) -> str:
+def _format_stats(stats, settings, car_name: str, period: str) -> str:
     """Build HTML text for the statistics screen."""
     currency = settings.currency
     lines = [
-        f"📊 <b>Статистика — {html_escape(car_name)}</b>\n",
+        f"📊 <b>Статистика — {html_escape(car_name)} · {period}</b>\n",
         f"🧾 Заправок: {fmt_num(stats.total_refuels, 0)}",
         f"📏 Пробіг за період: {fmt_num(stats.total_distance_km, 0)} км",
         f"🔢 Всього пального: {fmt_num(stats.total_liters)} л",
@@ -180,6 +219,16 @@ async def callback_stats(callback: CallbackQuery, state: FSMContext) -> None:
     await db.ensure_tg_user(callback.from_user)
     await callback.answer()
     await _show_stats(callback.message, callback.from_user.id, edit=True)
+
+
+@router.callback_query(F.data.startswith(STATS_PERIOD_PREFIX))
+@safe_callback
+async def callback_stats_period(callback: CallbackQuery, state: FSMContext) -> None:
+    """Switch the statistics period (all visible years or one year)."""
+    suffix = callback.data.removeprefix(STATS_PERIOD_PREFIX)
+    year = None if callback.data == STATS_PERIOD_ALL else int(suffix) if suffix.isdigit() else None
+    await callback.answer()
+    await _show_stats(callback.message, callback.from_user.id, edit=True, year=year)
 
 
 @router.message(Command("last"))

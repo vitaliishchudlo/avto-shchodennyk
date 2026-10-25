@@ -17,6 +17,14 @@ SETTINGS_CARS = "settings:cars"
 SETTINGS_CURRENCY = "settings:currency"
 SETTINGS_EXTENDED_HISTORY = "settings:extended:toggle"
 SETTINGS_AI_IMPORT = "settings:ai_import"
+SETTINGS_ARCHIVE = "settings:archive"
+
+ARCHIVE_TOGGLE_PREFIX = "archive:t:"
+ARCHIVE_SHOW_ALL = "archive:show_all"
+ARCHIVE_HIDE_ALL = "archive:hide_all"
+
+STATS_PERIOD_PREFIX = "stats:p:"
+STATS_PERIOD_ALL = "stats:p:all"
 SETTINGS_BACK = "settings:back"
 
 IMPORT_CAR_CONFIRM = "import:car:yes"
@@ -389,6 +397,55 @@ def history_empty_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def archive_keyboard(years: list[tuple[int, int]], hidden: set[int]) -> InlineKeyboardMarkup:
+    """Year toggles for the archive screen (✅ visible / 🙈 hidden) plus bulk actions."""
+    rows: list[list[InlineKeyboardButton]] = []
+    for year, count in years:
+        mark = "🙈" if year in hidden else "✅"
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{mark} {year} · {count} зап.",
+                callback_data=f"{ARCHIVE_TOGGLE_PREFIX}{year}",
+            )
+        ])
+    if years:
+        rows.append([
+            InlineKeyboardButton(text="👁 Показати всі", callback_data=ARCHIVE_SHOW_ALL),
+            InlineKeyboardButton(text="🙈 Сховати всі", callback_data=ARCHIVE_HIDE_ALL),
+        ])
+    rows.append([InlineKeyboardButton(text="⬅️ Налаштування", callback_data=SETTINGS_BACK)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def stats_keyboard(
+    years: list[int],
+    selected: int | None,
+    *,
+    all_label: str = "Весь час",
+) -> InlineKeyboardMarkup:
+    """Period switcher for statistics: all visible years, or one visible year.
+
+    all_label names the "all" period honestly, e.g. "2025–2026" while years are archived.
+    """
+    def label(text: str, active: bool) -> str:
+        return f"• {text} •" if active else text
+
+    period_buttons = []
+    if years:
+        period_buttons.append(
+            InlineKeyboardButton(text=label(all_label, selected is None), callback_data=STATS_PERIOD_ALL)
+        )
+    # With a single year the "all" button already is that year
+    if len(years) > 1:
+        period_buttons.extend(
+            InlineKeyboardButton(text=label(str(year), selected == year), callback_data=f"{STATS_PERIOD_PREFIX}{year}")
+            for year in years
+        )
+    rows = [period_buttons[i:i + 4] for i in range(0, len(period_buttons), 4)]
+    rows.append([InlineKeyboardButton(text="🏠 Головне меню", callback_data=MENU_HOME)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def settings_keyboard(*, extended_history: bool = True) -> InlineKeyboardMarkup:
     """Build the settings submenu: cars, currency, toggles, rare AI import."""
     ext_label = "Увімк." if extended_history else "Вимк."
@@ -396,6 +453,7 @@ def settings_keyboard(*, extended_history: bool = True) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="🚗 Авто", callback_data=SETTINGS_CARS)],
             [InlineKeyboardButton(text="💱 Валюта", callback_data=SETTINGS_CURRENCY)],
+            [InlineKeyboardButton(text="🗄 Архів років", callback_data=SETTINGS_ARCHIVE)],
             [
                 InlineKeyboardButton(
                     text=f"📊 Розширена історія: {ext_label}",

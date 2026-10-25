@@ -374,7 +374,14 @@ async def build_save_summary(
     record = next((r for r in all_refuels if r.id == record_id), None)
     previous = build_prev_map(all_refuels).get(record_id)
     trip = calc_full_tank_trips(all_refuels).get(record_id)
-    return _format_save_summary(data, currency, record, previous, trip)
+    text = _format_save_summary(data, currency, record, previous, trip)
+    year = data["refuel_date"].year
+    if year in await db.get_hidden_years(car_id):
+        text += (
+            f"\n\n🗄 <i>{year} рік приховано в архіві — цю заправку не видно в історії "
+            "та статистиці. Показати: «⚙️ Налаштування» → «🗄 Архів років».</i>"
+        )
+    return text
 
 
 def _format_save_summary(

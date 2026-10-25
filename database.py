@@ -196,6 +196,19 @@ async def _migrate_user_settings_table(db: aiosqlite.Connection) -> None:
         await db.execute("PRAGMA user_version = 1")
 
 
+async def _migrate_hidden_years_table(db: aiosqlite.Connection) -> None:
+    """Create the per-car archive of years hidden from history and statistics."""
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS car_hidden_years (
+            car_id INTEGER NOT NULL,
+            year INTEGER NOT NULL,
+            PRIMARY KEY (car_id, year)
+        )
+        """
+    )
+
+
 async def init_db() -> None:
     """Create tables, run migrations, and ensure indexes exist."""
     async with aiosqlite.connect(DATABASE_PATH) as db:
@@ -231,6 +244,7 @@ async def init_db() -> None:
         await _migrate_cars_table(db)
         await _migrate_user_settings_table(db)
         await _migrate_legacy_cars(db)
+        await _migrate_hidden_years_table(db)
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_refuels_user_date ON refuels(user_id, date)"
         )
@@ -440,6 +454,43 @@ async def rename_car(user_id: int, car_id: int, name: str) -> Car:
     return car  # type: ignore[return-value]
 
 
+async def get_refuel_years(user_id: int, car_id: int) -> list[tuple[int, int]]:
+    """Return (year, refuel count) pairs for a car, newest year first."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cursor = await db.execute(
+            """
+            SELECT CAST(substr(date, 1, 4) AS INTEGER) AS year, COUNT(*)
+            FROM refuels
+            WHERE user_id = ? AND car_id = ?
+            GROUP BY year
+            ORDER BY year DESC
+            """,
+            (user_id, car_id),
+        )
+        return [(row[0], row[1]) for row in await cursor.fetchall()]
+
+
+async def get_hidden_years(car_id: int) -> set[int]:
+    """Years archived for the car (hidden from history and statistics)."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cursor = await db.execute(
+            "SELECT year FROM car_hidden_years WHERE car_id = ?",
+            (car_id,),
+        )
+        return {row[0] for row in await cursor.fetchall()}
+
+
+async def set_hidden_years(car_id: int, years: set[int]) -> None:
+    """Replace the car's archived years with *years*."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute("DELETE FROM car_hidden_years WHERE car_id = ?", (car_id,))
+        await db.executemany(
+            "INSERT INTO car_hidden_years (car_id, year) VALUES (?, ?)",
+            [(car_id, year) for year in sorted(years)],
+        )
+        await db.commit()
+
+
 async def count_refuels_for_car(car_id: int) -> int:
     async with aiosqlite.connect(DATABASE_PATH) as db:
         cursor = await db.execute(
@@ -462,6 +513,7 @@ async def delete_car(user_id: int, car_id: int) -> bool:
 
     async with aiosqlite.connect(DATABASE_PATH) as db:
         await db.execute("DELETE FROM refuels WHERE car_id = ?", (car_id,))
+        await db.execute("DELETE FROM car_hidden_years WHERE car_id = ?", (car_id,))
         await db.execute(
             "DELETE FROM cars WHERE id = ? AND user_id = ?",
             (car_id, user_id),

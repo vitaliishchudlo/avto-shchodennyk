@@ -3,6 +3,7 @@
 from handlers import (
     add_fuel,
     add_photo,
+    archive,
     cars,
     export,
     fallback,
@@ -16,6 +17,7 @@ from handlers import (
 __all__ = [
     "add_fuel",
     "add_photo",
+    "archive",
     "cars",
     "export",
     "fallback",
