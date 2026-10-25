@@ -23,8 +23,9 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
 
 
 @router.message(Command("help"))
-async def cmd_help(message: Message) -> None:
-    """Show the help text with available commands."""
+async def cmd_help(message: Message, state: FSMContext) -> None:
+    """Show the help text with available commands (leaves any unfinished wizard)."""
+    await state.clear()
     await message.answer(HELP_TEXT, reply_markup=main_menu_keyboard(), parse_mode="HTML")
 
 

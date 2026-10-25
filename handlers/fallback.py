@@ -16,6 +16,7 @@ def _is_fsm_active(state_name: str | None) -> bool:
         return False
     return state_name.startswith((
         "AddFuelStates:",
+        "PhotoFuelStates:",
         "SettingsStates:",
         "CarStates:",
         "ImportStates:",
@@ -23,10 +24,8 @@ def _is_fsm_active(state_name: str | None) -> bool:
 
 
 @router.message(F.text.startswith("/"))
-async def unknown_command(message: Message, state: FSMContext) -> None:
-    """Reply to unrecognized slash commands when no FSM flow is active."""
-    if _is_fsm_active(await state.get_state()):
-        return
+async def unknown_command(message: Message) -> None:
+    """Reply to unrecognized slash commands; an unfinished wizard stays where it was."""
     await message.answer(UNKNOWN_COMMAND_TEXT, reply_markup=main_menu_keyboard())
 
 

@@ -58,6 +58,26 @@ def fmt_date(dt: date | datetime) -> str:
     return code(format_date(dt))
 
 
+def fmt_total(total: float, discount: float, currency: str) -> str:
+    """Format a full (pre-discount) amount, appending discount and paid sum if any.
+
+    Args:
+        total: Full amount before discount.
+        discount: Discount amount; 0 means no discount.
+        currency: Currency label.
+
+    Returns:
+        HTML fragment like "4 433 грн (знижка −878, сплачено 3 555 грн)".
+    """
+    text = f"{fmt_num(total, 0)} {currency}"
+    if discount > 0:
+        text += (
+            f" (знижка −{fmt_num(discount, 0)}, "
+            f"сплачено {fmt_num(total - discount, 0)} {currency})"
+        )
+    return text
+
+
 def active_car_banner(car_name: str) -> str:
     """Build the active-car banner line shown at the top of car-scoped screens.
 

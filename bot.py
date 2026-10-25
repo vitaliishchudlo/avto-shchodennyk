@@ -11,7 +11,18 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import BOT_TOKEN
 from database import init_db
-from handlers import add_fuel, cars, export, fallback, history, import_data, settings, start, stats
+from handlers import (
+    add_fuel,
+    add_photo,
+    cars,
+    export,
+    fallback,
+    history,
+    import_data,
+    settings,
+    start,
+    stats,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,6 +45,7 @@ async def main() -> None:
     dp.include_router(start.router)
     dp.include_router(add_fuel.router)
     dp.include_router(import_data.router)
+    dp.include_router(add_photo.router)
     dp.include_router(cars.router)
     dp.include_router(history.router)
     dp.include_router(stats.router)

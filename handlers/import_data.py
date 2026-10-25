@@ -12,6 +12,7 @@ from aiogram.types import CallbackQuery, Message
 
 import database as db
 from handlers.callback_guard import safe_callback
+from handlers.filters import NotForeignCommand
 from keyboards.cars import cars_list_keyboard
 from keyboards.main_menu import (
     IMPORT_CAR_CHANGE,
@@ -28,7 +29,7 @@ from keyboards.main_menu import (
 )
 from keyboards.utils import safe_clear_markup, safe_edit_text
 from services.ai_import import AIImportError, is_ai_configured, map_import_payload
-from services.formatting import code, fmt_date, fmt_num, html_escape
+from services.formatting import code, fmt_date, fmt_num, fmt_total, html_escape
 from services.import_parse import ImportParseError, parse_document_bytes, parse_free_text
 from services.import_validate import (
     ValidatedRefuel,
@@ -38,6 +39,7 @@ from services.import_validate import (
 from states.fuel_states import ImportStates
 
 router = Router()
+router.message.filter(NotForeignCommand("import"))
 logger = logging.getLogger(__name__)
 
 PREVIEW_LIMIT = 5
@@ -51,10 +53,11 @@ AWAIT_PAYLOAD_TEXT = (
     "• або звичайне повідомлення — таблицю, список чи короткий опис\n\n"
     "Назви колонок можуть бути будь-якими.\n\n"
     "AI розпізнає, зокрема:\n"
-    "дату, пробіг, літри, ціну за літр, суму, пальне (наприклад Pulls 95), "
-    "АЗС (якщо є), а також примітки чи знижки.\n\n"
+    "дату, пробіг, літри, ціну за літр, суму, знижку, пальне (наприклад Pulls 95), "
+    "АЗС (якщо є) та примітки.\n\n"
     "Місто чи область як «локацію» вказувати не потрібно.\n"
-    "Перед додаванням покажемо прев’ю — ти зможеш перевірити записи."
+    "Перед додаванням покажемо прев’ю — ти зможеш перевірити записи.\n\n"
+    "📸 Щоб додати одну заправку по фото чека — просто надішли фото в головному меню."
 )
 
 CLARIFY_HINT = (
@@ -144,7 +147,7 @@ def _format_preview_row(record: ValidatedRefuel, currency: str) -> str:
         f"📅 {fmt_date(record.refuel_date)}",
         f"{fmt_num(record.odometer_km, 0)} км",
         f"{fmt_num(record.liters)} л",
-        f"{fmt_num(record.total_price, 0)} {currency}",
+        fmt_total(record.total_price, record.discount, currency),
         html_escape(record.fuel_type),
     ]
     if record.station_name:
@@ -219,6 +222,32 @@ async def _download_document(bot: Bot, message: Message) -> tuple[str | None, by
     return document.file_name, data
 
 
+async def _drop_existing(
+    user_id: int,
+    state: FSMContext,
+    records: list[ValidatedRefuel],
+) -> tuple[list[ValidatedRefuel], list[str]]:
+    """Skip records already stored for the car, so re-importing a file adds nothing twice."""
+    data = await state.get_data()
+    car_id = data.get("car_id") or (await db.get_active_car(user_id)).id
+    kept: list[ValidatedRefuel] = []
+    skipped = 0
+    for record in records:
+        duplicate = await db.find_duplicate_refuel(
+            user_id,
+            car_id,
+            refuel_date=record.refuel_date,
+            odometer_km=record.odometer_km,
+            liters=record.liters,
+        )
+        if duplicate:
+            skipped += 1
+        else:
+            kept.append(record)
+    issues = [f"Вже є в базі, пропущено записів: {skipped}."] if skipped else []
+    return kept, issues
+
+
 async def _process_raw_rows(
     message: Message,
     state: FSMContext,
@@ -248,6 +277,18 @@ async def _process_raw_rows(
 
     await state.update_data(raw_rows=raw_rows)
 
+    recognized_count = len(validated)
+    validated, duplicate_issues = await _drop_existing(message.from_user.id, state, validated)
+    if recognized_count and not validated:
+        await state.set_state(ImportStates.clarify)
+        await status_msg.edit_text(
+            f"ℹ️ Усі розпізнані записи ({recognized_count}) вже є в базі — нового нічого не додаю.\n\n"
+            "Можеш надіслати інший файл або скасувати.",
+            reply_markup=import_cancel_keyboard(),
+        )
+        return
+    issues = [*duplicate_issues, *issues]
+
     if not validated:
         try:
             await status_msg.delete()
@@ -262,9 +303,12 @@ async def _process_raw_rows(
 
     if issues:
         note = (
-            f"✅ Розпізнано {len(validated)} записів.\n"
-            f"⚠️ Частину рядків пропущено — їх не додамо без повних даних."
+            f"✅ Розпізнано записів: {len(validated)}.\n"
+            "⚠️ Зауваження (рядки з неповними даними не додамо):\n"
+            + "\n".join(f"• {html_escape(issue)}" for issue in issues[:5])
         )
+        if len(issues) > 5:
+            note += f"\n… і ще {len(issues) - 5}"
         await status_msg.edit_text(note)
     else:
         try:
@@ -469,6 +513,15 @@ async def callback_import_cancel(callback: CallbackQuery, state: FSMContext) -> 
         text,
         reply_markup=settings_keyboard(extended_history=settings.extended_history),
         parse_mode="HTML",
+    )
+
+
+@router.message(StateFilter(ImportStates.await_payload, ImportStates.clarify), F.photo)
+async def import_photo_hint(message: Message) -> None:
+    await message.answer(
+        "AI-імпорт приймає файл CSV/Excel або текст.\n"
+        "Щоб додати одну заправку по фото чека — скасуй імпорт і натисни «📸 Заправка по фото».",
+        reply_markup=import_cancel_keyboard(),
     )
 
 

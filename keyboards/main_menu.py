@@ -6,6 +6,7 @@ from services.fuel_products import POPULAR_STATIONS, STATION_SLUGS
 
 # Callback prefixes
 MENU_ADD = "menu:add"
+MENU_ADD_PHOTO = "menu:add_photo"
 MENU_STATS = "menu:stats"
 MENU_HISTORY = "menu:history"
 MENU_LAST = "menu:last"
@@ -33,6 +34,11 @@ FUEL_DATE_OTHER = "fuel:date:other"
 FUEL_STATION_PREFIX = "fuel:st:"
 FUEL_STATION_OTHER = "fuel:st:other"
 FUEL_ENTER_TOTAL = "fuel:enter_total"
+FUEL_ENTER_PER_LITER = "fuel:enter_per_liter"
+FUEL_DISCOUNT_NONE = "fuel:discount:none"
+FUEL_DISCOUNT_AMOUNT = "fuel:discount:amount"
+FUEL_DISCOUNT_PER_LITER = "fuel:discount:per_liter"
+FUEL_NOTE_SKIP = "fuel:note:skip"
 FUEL_TYPE_PREFIX = "fuel:type:"
 FUEL_PRODUCT_PREFIX = "fuel:product:"
 FUEL_PRODUCT_CUSTOM = "fuel:product:custom"
@@ -41,6 +47,17 @@ FUEL_FULL_TANK_PREFIX = "fuel:full:"
 FUEL_CONFIRM_SAVE = "fuel:save"
 FUEL_CONFIRM_CANCEL = "fuel:cancel"
 FUEL_CONFIRM_RESTART = "fuel:restart"
+
+PHOTO_SAVE = "photo:save"
+PHOTO_TOGGLE_FULL = "photo:full"
+PHOTO_NOTE = "photo:note"
+PHOTO_EDIT = "photo:edit"
+PHOTO_CAR = "photo:car"
+PHOTO_CAR_PICK_PREFIX = "photo:car:pick:"
+PHOTO_FUEL_PREFIX = "photo:fuel:"
+PHOTO_FUEL_KEEP = "photo:fuel:keep"
+PHOTO_BACK = "photo:back"
+PHOTO_CANCEL = "photo:cancel"
 
 LAST_DELETE = "last:delete"
 LAST_DELETE_CONFIRM = "last:delete:yes"
@@ -60,13 +77,76 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     """Build the root inline menu shown after /start and navigation home."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Додати заправку", callback_data=MENU_ADD)],
+            [
+                InlineKeyboardButton(text="📸 Заправка по фото", callback_data=MENU_ADD_PHOTO),
+                InlineKeyboardButton(text="✍️ Вручну", callback_data=MENU_ADD),
+            ],
             [
                 InlineKeyboardButton(text="📊 Статистика", callback_data=MENU_STATS),
                 InlineKeyboardButton(text="📜 Історія", callback_data=MENU_HISTORY),
             ],
-            [InlineKeyboardButton(text="⛽ Остання заправка", callback_data=MENU_LAST)],
-            [InlineKeyboardButton(text="⚙️ Налаштування", callback_data=MENU_SETTINGS)],
+            [
+                InlineKeyboardButton(text="⛽ Остання заправка", callback_data=MENU_LAST),
+                InlineKeyboardButton(text="⚙️ Налаштування", callback_data=MENU_SETTINGS),
+            ],
+        ]
+    )
+
+
+def photo_cancel_keyboard() -> InlineKeyboardMarkup:
+    """Single cancel button while waiting for photo input."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Скасувати", callback_data=PHOTO_CANCEL)],
+        ]
+    )
+
+
+def photo_fuel_keyboard(products: list[str], keep_name: str | None) -> InlineKeyboardMarkup:
+    """Catalog fuel choices for an unrecognized receipt fuel name, two per row."""
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for index, product in enumerate(products):
+        row.append(InlineKeyboardButton(text=product, callback_data=f"{PHOTO_FUEL_PREFIX}{index}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    if keep_name:
+        label = keep_name if len(keep_name) <= 30 else keep_name[:29] + "…"
+        rows.append([
+            InlineKeyboardButton(text=f"✍️ Залишити «{label}»", callback_data=PHOTO_FUEL_KEEP)
+        ])
+    rows.append([InlineKeyboardButton(text="❌ Скасувати", callback_data=PHOTO_CANCEL)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def photo_back_keyboard() -> InlineKeyboardMarkup:
+    """Back-to-preview button for note / correction prompts."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад до перевірки", callback_data=PHOTO_BACK)],
+        ]
+    )
+
+
+def photo_preview_keyboard(*, full_tank: bool, has_note: bool) -> InlineKeyboardMarkup:
+    """Build preview actions for a photo-recognized refuel."""
+    tank_label = "🛢 Повний бак: Так" if full_tank else "🛢 Повний бак: Ні"
+    note_label = "📝 Змінити примітку" if has_note else "📝 Додати примітку"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Зберегти", callback_data=PHOTO_SAVE)],
+            [
+                InlineKeyboardButton(text=tank_label, callback_data=PHOTO_TOGGLE_FULL),
+                InlineKeyboardButton(text=note_label, callback_data=PHOTO_NOTE),
+            ],
+            [
+                InlineKeyboardButton(text="✏️ Виправити", callback_data=PHOTO_EDIT),
+                InlineKeyboardButton(text="🚗 Інше авто", callback_data=PHOTO_CAR),
+            ],
+            [InlineKeyboardButton(text="❌ Скасувати", callback_data=PHOTO_CANCEL)],
         ]
     )
 
@@ -216,11 +296,34 @@ def fuel_product_manual_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def enter_total_keyboard() -> InlineKeyboardMarkup:
-    """Build the optional total-price entry step in the add-fuel wizard."""
+def price_mode_keyboard() -> InlineKeyboardMarkup:
+    """Build the choice between entering the receipt total or price per liter."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="💰 Ввести суму", callback_data=FUEL_ENTER_TOTAL)],
+            [InlineKeyboardButton(text="🧾 Сума чека", callback_data=FUEL_ENTER_TOTAL)],
+            [InlineKeyboardButton(text="⛽ Ціна за літр", callback_data=FUEL_ENTER_PER_LITER)],
+            _cancel_row(),
+        ]
+    )
+
+
+def discount_keyboard() -> InlineKeyboardMarkup:
+    """Build discount options: none, a flat amount, or per liter."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="➖ Без знижки", callback_data=FUEL_DISCOUNT_NONE)],
+            [InlineKeyboardButton(text="💸 Знижка сумою", callback_data=FUEL_DISCOUNT_AMOUNT)],
+            [InlineKeyboardButton(text="⛽ Знижка на літр", callback_data=FUEL_DISCOUNT_PER_LITER)],
+            _cancel_row(),
+        ]
+    )
+
+
+def note_keyboard() -> InlineKeyboardMarkup:
+    """Build the skip button for the optional note step."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⏭ Пропустити", callback_data=FUEL_NOTE_SKIP)],
             _cancel_row(),
         ]
     )

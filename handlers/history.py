@@ -15,6 +15,7 @@ from keyboards.main_menu import (
     history_empty_keyboard,
     history_keyboard,
 )
+from services.calculations import calc_full_tank_trips
 from services.csv_export import csv_filename, export_refuels_to_csv
 from services.formatting import active_car_banner, code, html_escape
 from services.history_format import (
@@ -57,6 +58,7 @@ async def _show_history(target: Message, user_id: int, page: int, *, edit: bool 
         settings.currency,
         per_page=HISTORY_PER_PAGE,
         extended_history=settings.extended_history,
+        trips=calc_full_tank_trips(all_refuels),
     )
 
     text = active_car_banner(car.name) + "\n" + result.text
