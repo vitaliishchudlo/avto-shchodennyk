@@ -5,6 +5,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from services.fuel_products import POPULAR_STATIONS, STATION_SLUGS
 
 # Callback prefixes
+MENU_ADD_CHOICE = "menu:add_choice"
 MENU_ADD = "menu:add"
 MENU_ADD_PHOTO = "menu:add_photo"
 MENU_STATS = "menu:stats"
@@ -85,10 +86,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     """Build the root inline menu shown after /start and navigation home."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(text="📸 Заправка по фото", callback_data=MENU_ADD_PHOTO),
-                InlineKeyboardButton(text="✍️ Вручну", callback_data=MENU_ADD),
-            ],
+            [InlineKeyboardButton(text="⛽ Додати заправку", callback_data=MENU_ADD_CHOICE)],
             [
                 InlineKeyboardButton(text="📊 Статистика", callback_data=MENU_STATS),
                 InlineKeyboardButton(text="📜 Історія", callback_data=MENU_HISTORY),
@@ -97,6 +95,17 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="⛽ Остання заправка", callback_data=MENU_LAST),
                 InlineKeyboardButton(text="⚙️ Налаштування", callback_data=MENU_SETTINGS),
             ],
+        ]
+    )
+
+
+def add_choice_keyboard() -> InlineKeyboardMarkup:
+    """Choose how to add a refuel: from a receipt photo (AI) or manually."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📸 З фото чека · ШІ", callback_data=MENU_ADD_PHOTO)],
+            [InlineKeyboardButton(text="✍️ Вручну", callback_data=MENU_ADD)],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=MENU_HOME)],
         ]
     )
 

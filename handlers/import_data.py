@@ -520,7 +520,8 @@ async def callback_import_cancel(callback: CallbackQuery, state: FSMContext) -> 
 async def import_photo_hint(message: Message) -> None:
     await message.answer(
         "AI-імпорт приймає файл CSV/Excel або текст.\n"
-        "Щоб додати одну заправку по фото чека — скасуй імпорт і натисни «📸 Заправка по фото».",
+        "Щоб додати одну заправку по фото чека — скасуй імпорт і натисни "
+        "«⛽ Додати заправку» → «📸 З фото чека · ШІ».",
         reply_markup=import_cancel_keyboard(),
     )
 

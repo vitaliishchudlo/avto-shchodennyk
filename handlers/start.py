@@ -7,9 +7,9 @@ from aiogram.types import CallbackQuery, Message
 
 import database as db
 from handlers.callback_guard import safe_callback
-from handlers.messages import HELP_TEXT, MAIN_MENU_TEXT, WELCOME_TEXT
-from keyboards.main_menu import MENU_HOME, main_menu_keyboard
-from keyboards.utils import show_main_menu
+from handlers.messages import ADD_CHOICE_TEXT, HELP_TEXT, MAIN_MENU_TEXT, WELCOME_TEXT
+from keyboards.main_menu import MENU_ADD_CHOICE, MENU_HOME, add_choice_keyboard, main_menu_keyboard
+from keyboards.utils import safe_edit_text, show_main_menu
 
 router = Router()
 
@@ -27,6 +27,20 @@ async def cmd_help(message: Message, state: FSMContext) -> None:
     """Show the help text with available commands (leaves any unfinished wizard)."""
     await state.clear()
     await message.answer(HELP_TEXT, reply_markup=main_menu_keyboard(), parse_mode="HTML")
+
+
+@router.callback_query(F.data == MENU_ADD_CHOICE)
+@safe_callback
+async def callback_add_choice(callback: CallbackQuery, state: FSMContext) -> None:
+    """Ask how to add a refuel; both buttons start the existing flows unchanged."""
+    await state.clear()
+    await callback.answer()
+    await safe_edit_text(
+        callback.message,
+        ADD_CHOICE_TEXT,
+        reply_markup=add_choice_keyboard(),
+        parse_mode="HTML",
+    )
 
 
 @router.callback_query(F.data == MENU_HOME)
