@@ -17,6 +17,7 @@ CSV_HEADERS = [
     "liters",
     "price_per_liter",
     "total_price",
+    "discount",
     "full_tank",
     "note",
 ]
@@ -71,6 +72,7 @@ def export_refuels_to_csv(refuels: list[RefuelRecord], *, car_name: str) -> byte
             _csv_cell(record.liters),
             _csv_cell(record.price_per_liter),
             _csv_cell(record.total_price),
+            _csv_cell(record.discount),
             _csv_cell(record.full_tank),
             _csv_cell(record.note),
         ])

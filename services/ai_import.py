@@ -4,34 +4,42 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 from pydantic import BaseModel, Field
 
 from config import GEMINI_API_KEY, GEMINI_MODEL
+from services.fuel_products import catalog_prompt_text
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """\
+ModelT = TypeVar("ModelT", bound=BaseModel)
+
+SYSTEM_PROMPT = f"""\
 Ти допомагаєш імпортувати історію заправок у Telegram-бот обліку пального.
 
 Цільова структура ОДНОГО запису заправки:
 - date (обов'язково): дата YYYY-MM-DD
 - odometer_km (обов'язково): пробіг / одометр у км (число > 0)
 - liters (обов'язково): літри (число > 0)
-- price_per_liter (обов'язково): ціна за літр; можна обчислити як total_price / liters
-- total_price (обов'язково): загальна сума; можна обчислити як price_per_liter * liters
-- fuel_type (обов'язково): назва пального (Pulls 95, А-95, ДП Євро, газ тощо). \
-Одне поле — і категорія, і конкретна марка. Якщо є і тип і продукт — обери найконкретніше.
+- price_per_liter (обов'язково): ціна за літр БЕЗ знижки; можна обчислити як total_price / liters
+- total_price (обов'язково): повна сума БЕЗ знижки; можна обчислити як price_per_liter * liters
+- discount (опційно): сума знижки на весь запис (додатне число); якщо знижки немає — null
+- fuel_type (обов'язково): назва пального. Одне поле — і категорія, і конкретна марка. \
+Якщо АЗС відома — обери ТОЧНУ назву з довідника нижче («95 EURO» на ОККО → «А-95 Євро», \
+«95 PULLS» → «Pulls 95»). Якщо відповідника немає — залиш назву як у даних.
 - station_name (опційно): лише мережа/назва АЗС (ОККО, WOG, SOCAR…). \
 НЕ місто, область чи «локація» на кшталт «Івано-Франківськ». Якщо є лише місто — station_name = null.
 - full_tank (опційно): true/false; якщо невідомо — null
-- note (опційно): примітка, знижка, або зайва гео-локація якщо хочеш зберегти її текстом
+- note (опційно): примітка або зайва гео-локація, якщо хочеш зберегти її текстом
 
 Правила:
 1. Користувачі ведуть трекери ПО-РІЗНОМУ: будь-які мови, назви колонок, порядок, формати дат.
 2. Сам зрозумій сенс колонок і значень і піджени під цільову схему. Не вимагай фіксованих назв колонок.
 3. Якщо є лише ціна за літр і літри — порахуй total_price. Якщо лише сума і літри — порахуй price_per_liter.
+3a. Знижки: total_price і price_per_liter — завжди ДО знижки, а розмір знижки — в discount. \
+Запис на кшталт «3555(-878)» означає сплачено 3555, знижка 878, тобто total_price = 4433, discount = 878. \
+Якщо є сплачена сума і знижка — total_price = сплачено + знижка. Знижку на літр помнож на літри.
 4. Дати нормалізуй у YYYY-MM-DD (розумій DD.MM.YYYY, MM/DD/YYYY, Excel-дати тощо).
 5. Числа: крапка або кома як десятковий роздільник; ігноруй валютні символи та «км», «л».
 6. НІКОЛИ не вигадуй пробіг, дату, літри, суми чи АЗС, яких немає в даних.
@@ -41,6 +49,9 @@ SYSTEM_PROMPT = """\
 9. Якщо все можна зібрати — status=ok і records з усіма рядками.
 10. Рядки без жодних даних про заправку пропускай.
 11. Відповідай лише структурованим JSON за схемою.
+
+Довідник пального (уніфіковані назви):
+{catalog_prompt_text()}
 """
 
 
@@ -62,6 +73,7 @@ class ImportRecord(BaseModel):
     liters: float | None = None
     price_per_liter: float | None = None
     total_price: float | None = None
+    discount: float | None = None
     fuel_type: str | None = None
     station_name: str | None = None
     full_tank: bool | None = None
@@ -111,6 +123,26 @@ async def map_import_payload(
     clarification: str | None = None,
 ) -> ImportAIResult:
     """Ask Gemini to map arbitrary rows onto the refuel schema."""
+    prompt = _build_user_prompt(raw_rows, clarification=clarification)
+    return await generate_structured(
+        prompt,
+        schema=ImportAIResult,
+        system_prompt=SYSTEM_PROMPT,
+        log_label="import mapping",
+    )
+
+
+async def generate_structured(
+    contents: Any,
+    *,
+    schema: type[ModelT],
+    system_prompt: str,
+    log_label: str,
+) -> ModelT:
+    """Call Gemini with a JSON response schema and parse the result into *schema*.
+
+    Shared by bulk import and photo recognition so error handling stays identical.
+    """
     if not GEMINI_API_KEY:
         raise AIImportError(
             "AI не налаштовано. Додай GEMINI_API_KEY у файл .env "
@@ -125,21 +157,22 @@ async def map_import_payload(
         ) from exc
 
     client = genai.Client(api_key=GEMINI_API_KEY)
-    prompt = _build_user_prompt(raw_rows, clarification=clarification)
 
     try:
         response = await client.aio.models.generate_content(
             model=GEMINI_MODEL,
-            contents=prompt,
+            contents=contents,
             config={
-                "system_instruction": SYSTEM_PROMPT,
+                "system_instruction": system_prompt,
                 "response_mime_type": "application/json",
-                "response_schema": ImportAIResult,
+                "response_schema": schema,
                 "temperature": 0.1,
+                # No tools are passed, so automatic function calling is never needed
+                "automatic_function_calling": {"disable": True},
             },
         )
     except Exception as exc:  # noqa: BLE001
-        logger.exception("Gemini import mapping failed")
+        logger.exception("Gemini %s failed", log_label)
         message = str(exc)
         if "429" in message or "RESOURCE_EXHAUSTED" in message:
             raise AIImportError(
@@ -154,16 +187,16 @@ async def map_import_payload(
         ) from exc
 
     parsed = getattr(response, "parsed", None)
-    if isinstance(parsed, ImportAIResult):
+    if isinstance(parsed, schema):
         return parsed
     if isinstance(parsed, dict):
-        return ImportAIResult.model_validate(parsed)
+        return schema.model_validate(parsed)
 
     text = getattr(response, "text", None) or ""
     if not text.strip():
         raise AIImportError("AI повернув порожню відповідь.")
     try:
-        return ImportAIResult.model_validate_json(text)
+        return schema.model_validate_json(text)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to parse AI JSON: %s", text[:500])
         raise AIImportError("AI повернув некоректну відповідь. Спробуй ще раз.") from exc

@@ -18,8 +18,9 @@ ENV/
 # Keep example env template
 !.env.example
 
-# Local SQLite database
+# Local SQLite database and its backups
 fuel_tracker.db
+fuel_tracker.backup-*.db
 *.db-journal
 *.sqlite3
 

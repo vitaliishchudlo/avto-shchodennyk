@@ -8,6 +8,7 @@ from typing import Any
 
 from services.ai_import import ImportAIResult, ImportRecord
 from services.calculations import parse_date, parse_number
+from services.fuel_products import match_fuel_product, normalize_station_name
 
 
 REQUIRED_FIELDS = (
@@ -31,6 +32,7 @@ class ValidatedRefuel:
     station_name: str | None
     full_tank: bool
     note: str | None
+    discount: float = 0.0
 
 
 def _as_optional_str(value: Any) -> str | None:
@@ -102,6 +104,8 @@ def validate_ai_result(
         issues.extend(row_issues)
         if item is not None:
             validated.append(item)
+    # Chronological order for the preview (and the insert that follows it)
+    validated.sort(key=lambda r: (r.refuel_date, r.odometer_km))
 
     if not validated and not issues:
         issues.append(
@@ -163,6 +167,19 @@ def _validate_one(
     assert total is not None
     assert fuel_type is not None
 
+    discount = _parse_optional_number(raw.discount) or 0.0
+    discount = abs(discount)
+    if discount >= total:
+        issues.append(
+            f"Рядок {row_no}: знижка ({discount}) не менша за суму ({total}) — знижку не враховано."
+        )
+        discount = 0.0
+
+    station = _as_optional_str(raw.station_name)
+    station = normalize_station_name(station) if station else None
+    # Unknown fuel names stay as given: a bulk import cannot ask about each row
+    fuel_type = match_fuel_product(station, fuel_type) or fuel_type
+
     return (
         ValidatedRefuel(
             refuel_date=refuel_date,
@@ -171,9 +188,10 @@ def _validate_one(
             price_per_liter=price,
             total_price=total,
             fuel_type=fuel_type,
-            station_name=_as_optional_str(raw.station_name),
+            station_name=station,
             full_tank=bool(raw.full_tank) if raw.full_tank is not None else False,
             note=_as_optional_str(raw.note),
+            discount=round(discount, 2),
         ),
         issues,
     )
@@ -192,6 +210,7 @@ def records_to_fsm_dicts(records: list[ValidatedRefuel]) -> list[dict[str, Any]]
             "station_name": r.station_name,
             "full_tank": r.full_tank,
             "note": r.note,
+            "discount": r.discount,
         }
         for r in records
     ]
@@ -212,6 +231,7 @@ def fsm_dicts_to_records(data: list[dict[str, Any]]) -> list[ValidatedRefuel]:
                 station_name=item.get("station_name"),
                 full_tank=bool(item.get("full_tank", False)),
                 note=item.get("note"),
+                discount=float(item.get("discount") or 0),
             )
         )
     return result

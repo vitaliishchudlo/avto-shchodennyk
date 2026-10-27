@@ -45,6 +45,8 @@ class RefuelRecord:
     full_tank: bool
     note: str | None
     car_id: int | None = None
+    # Discount amount; total_price and price_per_liter are stored before discount
+    discount: float = 0.0
 
 
 def _parse_stored_date(value: str) -> datetime:
@@ -84,6 +86,7 @@ def _row_to_refuel(row: aiosqlite.Row) -> RefuelRecord:
         full_tank=bool(row["full_tank"]),
         note=row["note"],
         car_id=row["car_id"] if "car_id" in keys else None,
+        discount=(row["discount"] or 0.0) if "discount" in keys else 0.0,
     )
 
 
@@ -93,6 +96,10 @@ async def _migrate_refuels_table(db: aiosqlite.Connection) -> None:
     columns = {row[1] for row in await cursor.fetchall()}
     if "car_id" not in columns:
         await db.execute("ALTER TABLE refuels ADD COLUMN car_id INTEGER")
+    if "discount" not in columns:
+        await db.execute(
+            "ALTER TABLE refuels ADD COLUMN discount REAL NOT NULL DEFAULT 0"
+        )
 
 
 async def _migrate_cars_table(db: aiosqlite.Connection) -> None:
@@ -189,6 +196,19 @@ async def _migrate_user_settings_table(db: aiosqlite.Connection) -> None:
         await db.execute("PRAGMA user_version = 1")
 
 
+async def _migrate_hidden_years_table(db: aiosqlite.Connection) -> None:
+    """Create the per-car archive of years hidden from history and statistics."""
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS car_hidden_years (
+            car_id INTEGER NOT NULL,
+            year INTEGER NOT NULL,
+            PRIMARY KEY (car_id, year)
+        )
+        """
+    )
+
+
 async def init_db() -> None:
     """Create tables, run migrations, and ensure indexes exist."""
     async with aiosqlite.connect(DATABASE_PATH) as db:
@@ -224,6 +244,7 @@ async def init_db() -> None:
         await _migrate_cars_table(db)
         await _migrate_user_settings_table(db)
         await _migrate_legacy_cars(db)
+        await _migrate_hidden_years_table(db)
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_refuels_user_date ON refuels(user_id, date)"
         )
@@ -433,6 +454,43 @@ async def rename_car(user_id: int, car_id: int, name: str) -> Car:
     return car  # type: ignore[return-value]
 
 
+async def get_refuel_years(user_id: int, car_id: int) -> list[tuple[int, int]]:
+    """Return (year, refuel count) pairs for a car, newest year first."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cursor = await db.execute(
+            """
+            SELECT CAST(substr(date, 1, 4) AS INTEGER) AS year, COUNT(*)
+            FROM refuels
+            WHERE user_id = ? AND car_id = ?
+            GROUP BY year
+            ORDER BY year DESC
+            """,
+            (user_id, car_id),
+        )
+        return [(row[0], row[1]) for row in await cursor.fetchall()]
+
+
+async def get_hidden_years(car_id: int) -> set[int]:
+    """Years archived for the car (hidden from history and statistics)."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cursor = await db.execute(
+            "SELECT year FROM car_hidden_years WHERE car_id = ?",
+            (car_id,),
+        )
+        return {row[0] for row in await cursor.fetchall()}
+
+
+async def set_hidden_years(car_id: int, years: set[int]) -> None:
+    """Replace the car's archived years with *years*."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute("DELETE FROM car_hidden_years WHERE car_id = ?", (car_id,))
+        await db.executemany(
+            "INSERT INTO car_hidden_years (car_id, year) VALUES (?, ?)",
+            [(car_id, year) for year in sorted(years)],
+        )
+        await db.commit()
+
+
 async def count_refuels_for_car(car_id: int) -> int:
     async with aiosqlite.connect(DATABASE_PATH) as db:
         cursor = await db.execute(
@@ -455,6 +513,7 @@ async def delete_car(user_id: int, car_id: int) -> bool:
 
     async with aiosqlite.connect(DATABASE_PATH) as db:
         await db.execute("DELETE FROM refuels WHERE car_id = ?", (car_id,))
+        await db.execute("DELETE FROM car_hidden_years WHERE car_id = ?", (car_id,))
         await db.execute(
             "DELETE FROM cars WHERE id = ? AND user_id = ?",
             (car_id, user_id),
@@ -523,6 +582,7 @@ async def add_refuel(
     station_name: str | None,
     full_tank: bool,
     note: str | None = None,
+    discount: float = 0.0,
 ) -> int:
     """Insert a refuel record and return its row id."""
     date_str = refuel_date.strftime("%Y-%m-%d")
@@ -531,8 +591,8 @@ async def add_refuel(
             """
             INSERT INTO refuels (
                 user_id, car_id, date, odometer_km, liters, price_per_liter,
-                total_price, fuel_type, station_name, full_tank, note
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                total_price, fuel_type, station_name, full_tank, note, discount
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 user_id,
@@ -546,6 +606,7 @@ async def add_refuel(
                 station_name,
                 int(full_tank),
                 note,
+                discount,
             ),
         )
         await db.commit()
@@ -557,10 +618,10 @@ async def add_refuels_batch(
     car_id: int,
     items: list[dict[str, Any]],
 ) -> int:
-    """Insert many refuel records in one transaction. Return inserted count.
+    """Insert many refuel records in one transaction, oldest first. Return inserted count.
 
     Each item must contain: refuel_date, odometer_km, liters, price_per_liter,
-    total_price, fuel_type; optional station_name, full_tank, note.
+    total_price, fuel_type; optional station_name, full_tank, note, discount.
     """
     if not items:
         return 0
@@ -585,16 +646,20 @@ async def add_refuels_batch(
                 item.get("station_name"),
                 int(bool(item.get("full_tank", False))),
                 item.get("note"),
+                float(item.get("discount") or 0),
             )
         )
+
+    # Insert oldest first so row ids follow chronological order, whatever the source order
+    rows.sort(key=lambda row: (row[2], row[3]))
 
     async with aiosqlite.connect(DATABASE_PATH) as db:
         await db.executemany(
             """
             INSERT INTO refuels (
                 user_id, car_id, date, odometer_km, liters, price_per_liter,
-                total_price, fuel_type, station_name, full_tank, note
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                total_price, fuel_type, station_name, full_tank, note, discount
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
@@ -631,6 +696,76 @@ async def get_last_refuel(
             )
         row = await cursor.fetchone()
         return _row_to_refuel(row) if row else None
+
+
+async def find_duplicate_refuel(
+    user_id: int,
+    car_id: int,
+    *,
+    refuel_date: date,
+    odometer_km: float,
+    liters: float | None = None,
+) -> RefuelRecord | None:
+    """Return an existing refuel that looks like the same fill-up, if any.
+
+    Same car and either the same odometer reading, or the same date and liters.
+    """
+    date_str = refuel_date.strftime("%Y-%m-%d")
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT * FROM refuels
+            WHERE user_id = ? AND car_id = ?
+              AND (
+                ABS(odometer_km - ?) < 0.5
+                OR (substr(date, 1, 10) = ? AND ? IS NOT NULL AND ABS(liters - ?) < 0.05)
+              )
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (user_id, car_id, odometer_km, date_str, liters, liters),
+        )
+        row = await cursor.fetchone()
+        return _row_to_refuel(row) if row else None
+
+
+async def get_refuel_neighbors(
+    user_id: int,
+    car_id: int,
+    refuel_date: date,
+) -> tuple[RefuelRecord | None, RefuelRecord | None]:
+    """Return (latest refuel on or before the date, earliest refuel after the date).
+
+    A new refuel on that date must have an odometer between the two.
+    """
+    date_str = refuel_date.strftime("%Y-%m-%d")
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT * FROM refuels
+            WHERE user_id = ? AND car_id = ? AND substr(date, 1, 10) <= ?
+            ORDER BY date DESC, odometer_km DESC, id DESC
+            LIMIT 1
+            """,
+            (user_id, car_id, date_str),
+        )
+        before = await cursor.fetchone()
+        cursor = await db.execute(
+            """
+            SELECT * FROM refuels
+            WHERE user_id = ? AND car_id = ? AND substr(date, 1, 10) > ?
+            ORDER BY date ASC, odometer_km ASC, id ASC
+            LIMIT 1
+            """,
+            (user_id, car_id, date_str),
+        )
+        after = await cursor.fetchone()
+    return (
+        _row_to_refuel(before) if before else None,
+        _row_to_refuel(after) if after else None,
+    )
 
 
 async def get_previous_refuel(

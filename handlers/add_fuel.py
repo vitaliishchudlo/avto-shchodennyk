@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date
 
 from aiogram import F, Router
 from aiogram.filters import Command, StateFilter
@@ -11,6 +11,7 @@ from aiogram.types import CallbackQuery, Message
 
 import database as db
 from database import RefuelRecord
+from handlers.filters import NotForeignCommand
 from handlers.messages import MAIN_MENU_TEXT
 from keyboards.cars import (
     CAR_PICK_PREFIX,
@@ -25,21 +26,28 @@ from keyboards.main_menu import (
     FUEL_CONFIRM_SAVE,
     FUEL_DATE_OTHER,
     FUEL_DATE_TODAY,
+    FUEL_DISCOUNT_AMOUNT,
+    FUEL_DISCOUNT_NONE,
+    FUEL_DISCOUNT_PER_LITER,
+    FUEL_ENTER_PER_LITER,
     FUEL_ENTER_TOTAL,
     FUEL_FULL_TANK_PREFIX,
+    FUEL_NOTE_SKIP,
     FUEL_PRODUCT_PREFIX,
     FUEL_STATION_OTHER,
     FUEL_STATION_PREFIX,
     FUEL_TYPE_PREFIX,
     MENU_ADD,
     confirm_keyboard,
-    enter_total_keyboard,
+    discount_keyboard,
     fuel_product_keyboard,
     fuel_product_manual_keyboard,
     fuel_type_keyboard,
     full_tank_keyboard,
     home_button_keyboard,
     main_menu_keyboard,
+    note_keyboard,
+    price_mode_keyboard,
     refuel_date_keyboard,
     station_keyboard,
 )
@@ -51,17 +59,28 @@ from keyboards.utils import (
     track_prompt,
 )
 from services.calculations import (
-    calc_trip_stats,
+    TripStats,
+    calc_full_tank_trips,
+    odometer_order_error,
     parse_date,
     parse_number,
 )
-from services.formatting import code, fmt_date, fmt_num, html_escape
-from services.fuel_products import SLUG_TO_STATION, get_products, normalize_station_name
+from services.formatting import code, fmt_date, fmt_num, fmt_total, html_escape
+from services.history_format import build_prev_map, format_trip_analysis_lines
+from services.fuel_products import (
+    SLUG_TO_STATION,
+    get_products,
+    match_fuel_product,
+    normalize_station_name,
+)
 from states.fuel_states import AddFuelStates
 
 router = Router()
+router.message.filter(NotForeignCommand("add"))
 
-TOTAL_STEPS = 10
+TOTAL_STEPS = 11
+
+NOTE_MAX_LENGTH = 500
 
 DATE_STEP_TEXT = f"<b>1/{TOTAL_STEPS}</b> 📅 Це заправка за сьогодні?"
 
@@ -231,24 +250,69 @@ async def _ask_liters(target: Message, state: FSMContext, *, edit: bool = False)
 
 
 async def _ask_price(target: Message, state: FSMContext, *, edit: bool = False) -> None:
-    """Show step 7: price per liter or total amount."""
+    """Show step 7: choose between receipt total and price per liter."""
     await send_step(
         target,
         state,
-        _step(7, f"💰 Введи ціну за літр або загальну суму.\n\nНаприклад: {code('62.5')}"),
+        _step(
+            7,
+            "💰 Як зручніше вказати вартість?\n\n"
+            "🧾 <b>Сума чека</b> — скільки коштувало все пальне\n"
+            "⛽ <b>Ціна за літр</b> — ціна з табло АЗС\n\n"
+            "<i>Знижку вкажеш окремо на наступному кроці.</i>",
+        ),
         edit=edit,
-        reply_markup=enter_total_keyboard(),
+        reply_markup=price_mode_keyboard(),
+    )
+
+
+async def _ask_discount(
+    target: Message,
+    state: FSMContext,
+    currency: str,
+    *,
+    edit: bool = False,
+) -> None:
+    """Show step 8: discount choice, with the full amount for reference."""
+    data = await state.get_data()
+    await send_step(
+        target,
+        state,
+        _step(
+            8,
+            f"🏷 Сума без знижки: {fmt_num(data['total_price'], 0)} {currency} "
+            f"({fmt_num(data['price_per_liter'], 2)} {currency}/л)\n\n"
+            "Була знижка?",
+        ),
+        edit=edit,
+        reply_markup=discount_keyboard(),
     )
 
 
 async def _ask_full_tank(target: Message, state: FSMContext, *, edit: bool = False) -> None:
-    """Show step 8: full-tank yes/no."""
+    """Show step 9: full-tank yes/no."""
     await send_step(
         target,
         state,
         _step(9, "🛢 Чи був повний бак?"),
         edit=edit,
         reply_markup=full_tank_keyboard(),
+    )
+
+
+async def _ask_note(target: Message, state: FSMContext, *, edit: bool = False) -> None:
+    """Show step 10: optional free-text note."""
+    await send_step(
+        target,
+        state,
+        _step(
+            10,
+            "📝 Хочеш додати примітку до заправки?\n"
+            "Просто напиши її повідомленням або натисни «Пропустити».\n\n"
+            "Наприклад: <i>Поїздка у Львів, знижка за Fishka</i>",
+        ),
+        edit=edit,
+        reply_markup=note_keyboard(),
     )
 
 
@@ -259,7 +323,7 @@ async def _show_confirm(
     *,
     edit: bool = False,
 ) -> None:
-    """Show step 9: review collected data before saving."""
+    """Show step 11: review collected data before saving."""
     data = await state.get_data()
     settings = await db.ensure_user(user_id)
     text = (
@@ -276,55 +340,75 @@ def _format_confirmation(data: dict, currency: str) -> str:
     full_tank = "Так ✅" if data.get("full_tank") else "Ні ❌"
     refuel_date = data.get("refuel_date")
     date_str = fmt_date(refuel_date) if refuel_date else "—"
+    discount = data.get("discount", 0.0)
 
-    return (
-        f"📅 Дата: {date_str}\n"
-        f"🚗 Пробіг: {fmt_num(data['odometer_km'], 0)} км\n"
-        f"⛽ АЗС: <b>{html_escape(station)}</b>\n"
-        f"🧾 Пальне: <b>{html_escape(data['fuel_type'])}</b>\n"
-        f"🔢 Літри: {fmt_num(data['liters'])} л\n"
-        f"💰 Сума: {fmt_num(data['total_price'], 0)} {currency}\n"
-        f"🛢 Повний бак: {full_tank}"
-    )
+    lines = [
+        f"📅 Дата: {date_str}",
+        f"🚗 Пробіг: {fmt_num(data['odometer_km'], 0)} км",
+        f"⛽ АЗС: <b>{html_escape(station)}</b>",
+        f"🧾 Пальне: <b>{html_escape(data['fuel_type'])}</b>",
+        f"🔢 Літри: {fmt_num(data['liters'])} л",
+        f"💵 Ціна/л: {fmt_num(data['price_per_liter'], 2)} {currency}",
+        f"💰 Сума: {fmt_num(data['total_price'], 0)} {currency}",
+    ]
+    if discount > 0:
+        lines.extend([
+            f"🏷 Знижка: −{fmt_num(discount, 0)} {currency}",
+            f"💳 Сплачено: {fmt_num(data['total_price'] - discount, 0)} {currency}",
+        ])
+    lines.append(f"🛢 Повний бак: {full_tank}")
+    if data.get("note"):
+        lines.append(f"📝 Примітка: {html_escape(data['note'])}")
+    return "\n".join(lines)
 
 
-def _format_save_summary(data: dict, currency: str, previous: RefuelRecord | None) -> str:
+async def build_save_summary(
+    user_id: int,
+    car_id: int,
+    record_id: int,
+    data: dict,
+    currency: str,
+) -> str:
+    """Summary for a just-saved refuel; trip stats use the car's full history."""
+    all_refuels = await db.get_all_refuels(user_id, car_id)
+    record = next((r for r in all_refuels if r.id == record_id), None)
+    previous = build_prev_map(all_refuels).get(record_id)
+    trip = calc_full_tank_trips(all_refuels).get(record_id)
+    text = _format_save_summary(data, currency, record, previous, trip)
+    year = data["refuel_date"].year
+    if year in await db.get_hidden_years(car_id):
+        text += (
+            f"\n\n🗄 <i>{year} рік приховано в архіві — цю заправку не видно в історії "
+            "та статистиці. Показати: «⚙️ Налаштування» → «🗄 Архів років».</i>"
+        )
+    return text
+
+
+def _format_save_summary(
+    data: dict,
+    currency: str,
+    record: RefuelRecord | None,
+    previous: RefuelRecord | None,
+    trip: TripStats | None,
+) -> str:
     """Build HTML summary shown after a refuel is saved, including trip stats."""
     station = data.get("station_name") or "—"
     lines = [
         "Заправку збережено ✅\n",
         f"📅 Дата: {fmt_date(data['refuel_date'])}",
         f"🔢 Літри: {fmt_num(data['liters'])} л",
-        f"💰 Сума: {fmt_num(data['total_price'], 0)} {currency}",
+        f"💰 Сума: {fmt_total(data['total_price'], data.get('discount', 0.0), currency)}",
         f"⛽ АЗС: <b>{html_escape(station)}</b>",
         f"🧾 Пальне: <b>{html_escape(data['fuel_type'])}</b>",
         f"🚗 Пробіг: {fmt_num(data['odometer_km'], 0)} км",
     ]
+    if data.get("note"):
+        lines.append(f"📝 Примітка: {html_escape(data['note'])}")
 
-    if previous:
-        current = RefuelRecord(
-            id=0,
-            user_id=0,
-            date=datetime.combine(data["refuel_date"], datetime.min.time()),
-            odometer_km=data["odometer_km"],
-            liters=data["liters"],
-            price_per_liter=data["price_per_liter"],
-            total_price=data["total_price"],
-            fuel_type=data["fuel_type"],
-            station_name=data.get("station_name"),
-            full_tank=data.get("full_tank", False),
-            note=None,
+    if record is not None and previous is not None:
+        lines.extend(
+            format_trip_analysis_lines(record, previous, trip, currency, show_first_note=False)
         )
-        trip = calc_trip_stats(current, previous)
-        if trip:
-            lines.extend([
-                "",
-                "<b>З попередньої заправки:</b>",
-                f"📏 Проїхав: {fmt_num(trip.distance_km, 0)} км",
-                f"🔥 Витрата: {fmt_num(trip.consumption_l_per_100km)} л / 100 км",
-                f"💸 Вартість 100 км: {fmt_num(trip.cost_per_100km, 0)} {currency}",
-                f"🪙 Вартість 1 км: {fmt_num(trip.cost_per_km, 2)} {currency}",
-            ])
     else:
         lines.extend([
             "",
@@ -466,13 +550,26 @@ async def process_odometer(message: Message, state: FSMContext) -> None:
     user_id = message.from_user.id
     data = await state.get_data()
     car_id = data.get("car_id") or (await db.get_active_car(user_id)).id
-    previous = await db.get_previous_refuel(user_id, car_id, odometer)
-    if previous and odometer <= previous.odometer_km:
+    refuel_date = data.get("refuel_date") or date.today()
+
+    duplicate = await db.find_duplicate_refuel(
+        user_id,
+        car_id,
+        refuel_date=refuel_date,
+        odometer_km=odometer,
+    )
+    if duplicate:
         await message.answer(
-            "⚠️ Кілометраж має бути більший, ніж у попередньому записі "
-            f"({fmt_num(previous.odometer_km, 0)} км).",
+            f"⚠️ Заправка з пробігом {fmt_num(odometer, 0)} км уже є "
+            f"({fmt_date(duplicate.date)}, {fmt_num(duplicate.liters)} л).\n"
+            "Введи інший пробіг або скасуй додавання.",
             parse_mode="HTML",
         )
+        return
+
+    error = odometer_order_error(odometer, *await db.get_refuel_neighbors(user_id, car_id, refuel_date))
+    if error:
+        await message.answer(f"⚠️ {html_escape(error)}\nВведи пробіг ще раз.", parse_mode="HTML")
         return
 
     await state.update_data(odometer_km=odometer)
@@ -590,6 +687,12 @@ async def callback_fuel_product(callback: CallbackQuery, state: FSMContext) -> N
     await _ask_liters(callback.message, state, edit=True)
 
 
+async def _unified_fuel_name(state: FSMContext, name: str) -> str:
+    """Map a typed fuel name onto the station catalog (e.g. "95" -> "А-95 Євро")."""
+    data = await state.get_data()
+    return match_fuel_product(data.get("station_name"), name) or name
+
+
 @router.message(AddFuelStates.fuel_product)
 async def process_fuel_product_text(message: Message, state: FSMContext) -> None:
     name = message.text.strip()
@@ -598,7 +701,7 @@ async def process_fuel_product_text(message: Message, state: FSMContext) -> None
         return
 
     await clear_tracked_prompt(message.bot, state)
-    await state.update_data(fuel_type=name)
+    await state.update_data(fuel_type=await _unified_fuel_name(state, name))
     await state.set_state(AddFuelStates.liters)
     await _ask_liters(message, state)
 
@@ -610,7 +713,7 @@ async def process_fuel_product_custom(message: Message, state: FSMContext) -> No
         await message.answer("Введи назву пального.")
         return
 
-    await state.update_data(fuel_type=name)
+    await state.update_data(fuel_type=await _unified_fuel_name(state, name))
     await state.set_state(AddFuelStates.liters)
     await _ask_liters(message, state)
 
@@ -630,14 +733,46 @@ async def process_liters(message: Message, state: FSMContext) -> None:
         )
         return
 
-    await state.update_data(liters=liters, price_mode="per_liter")
+    await state.update_data(liters=liters)
     await state.set_state(AddFuelStates.price_mode)
     await _ask_price(message, state)
 
 
-# --- Step 7: price ---
+# --- Step 7: price (receipt total or price per liter, both before discount) ---
 
-@router.message(AddFuelStates.price_mode)
+@router.callback_query(F.data == FUEL_ENTER_TOTAL, AddFuelStates.price_mode)
+async def callback_enter_total(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.set_state(AddFuelStates.total_price)
+    await send_step(
+        callback.message,
+        state,
+        _step(
+            7,
+            "🧾 Введи повну суму чека <b>без знижки</b>.\n\n"
+            f"Наприклад: {code('2650')}",
+        ),
+        edit=True,
+    )
+
+
+@router.callback_query(F.data == FUEL_ENTER_PER_LITER, AddFuelStates.price_mode)
+async def callback_enter_per_liter(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.set_state(AddFuelStates.price_per_liter)
+    await send_step(
+        callback.message,
+        state,
+        _step(
+            7,
+            "⛽ Введи ціну за літр <b>без знижки</b> (як на табло АЗС).\n\n"
+            f"Наприклад: {code('62.5')}",
+        ),
+        edit=True,
+    )
+
+
+@router.message(AddFuelStates.price_per_liter)
 async def process_price_per_liter(message: Message, state: FSMContext) -> None:
     try:
         price = parse_number(message.text)
@@ -650,27 +785,13 @@ async def process_price_per_liter(message: Message, state: FSMContext) -> None:
         )
         return
 
-    await clear_tracked_prompt(message.bot, state)
-
     data = await state.get_data()
     total_price = round(price * data["liters"], 2)
 
     await state.update_data(price_per_liter=price, total_price=total_price)
-    await state.set_state(AddFuelStates.full_tank)
-    await _ask_full_tank(message, state)
-
-
-@router.callback_query(F.data == FUEL_ENTER_TOTAL, AddFuelStates.price_mode)
-async def callback_enter_total(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.answer()
-    await state.update_data(price_mode="total")
-    await state.set_state(AddFuelStates.total_price)
-    await safe_edit_text(
-        callback.message,
-        _step(7, f"💰 Введи загальну суму заправки.\n\nНаприклад: {code('2650')}"),
-        reply_markup=None,
-        parse_mode="HTML",
-    )
+    await state.set_state(AddFuelStates.discount)
+    settings = await db.ensure_user(message.from_user.id)
+    await _ask_discount(message, state, settings.currency)
 
 
 @router.message(AddFuelStates.total_price)
@@ -690,31 +811,147 @@ async def process_total_price(message: Message, state: FSMContext) -> None:
     price_per_liter = round(total / data["liters"], 2)
 
     await state.update_data(total_price=total, price_per_liter=price_per_liter)
+    await state.set_state(AddFuelStates.discount)
+    settings = await db.ensure_user(message.from_user.id)
+    await _ask_discount(message, state, settings.currency)
+
+
+# --- Step 8: discount ---
+
+@router.callback_query(F.data == FUEL_DISCOUNT_NONE, AddFuelStates.discount)
+async def callback_discount_none(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(discount=0.0)
+    await state.set_state(AddFuelStates.full_tank)
+    await callback.answer()
+    await _ask_full_tank(callback.message, state, edit=True)
+
+
+@router.callback_query(F.data == FUEL_DISCOUNT_AMOUNT, AddFuelStates.discount)
+async def callback_discount_amount(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.set_state(AddFuelStates.discount_amount)
+    await send_step(
+        callback.message,
+        state,
+        _step(8, f"💸 Введи суму знижки на весь чек.\n\nНаприклад: {code('150')}"),
+        edit=True,
+    )
+
+
+@router.callback_query(F.data == FUEL_DISCOUNT_PER_LITER, AddFuelStates.discount)
+async def callback_discount_per_liter(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.set_state(AddFuelStates.discount_per_liter)
+    await send_step(
+        callback.message,
+        state,
+        _step(
+            8,
+            "⛽ Введи знижку на 1 літр — бот сам помножить на кількість літрів.\n\n"
+            f"Наприклад: {code('2')} (знижка 2 на кожен літр)",
+        ),
+        edit=True,
+    )
+
+
+async def _apply_discount(message: Message, state: FSMContext, discount: float) -> None:
+    """Validate the discount against the full amount and move to the full-tank step."""
+    data = await state.get_data()
+    if discount >= data["total_price"]:
+        await message.answer(
+            "⚠️ Знижка не може бути більшою або рівною сумі чека "
+            f"({fmt_num(data['total_price'], 0)}). Введи ще раз.",
+            parse_mode="HTML",
+        )
+        return
+
+    await state.update_data(discount=discount)
     await state.set_state(AddFuelStates.full_tank)
     await _ask_full_tank(message, state)
 
 
-# --- Step 8: full tank ---
+@router.message(AddFuelStates.discount_amount)
+async def process_discount_amount(message: Message, state: FSMContext) -> None:
+    try:
+        discount = parse_number(message.text)
+        if discount <= 0:
+            raise ValueError
+    except (ValueError, TypeError):
+        await message.answer(
+            f"⚠️ Введи коректну суму знижки.\nНаприклад: {code('150')}",
+            parse_mode="HTML",
+        )
+        return
+
+    await _apply_discount(message, state, round(discount, 2))
+
+
+@router.message(AddFuelStates.discount_per_liter)
+async def process_discount_per_liter(message: Message, state: FSMContext) -> None:
+    try:
+        per_liter = parse_number(message.text)
+        if per_liter <= 0:
+            raise ValueError
+    except (ValueError, TypeError):
+        await message.answer(
+            f"⚠️ Введи коректну знижку на літр.\nНаприклад: {code('2')}",
+            parse_mode="HTML",
+        )
+        return
+
+    data = await state.get_data()
+    await _apply_discount(message, state, round(per_liter * data["liters"], 2))
+
+
+# --- Step 9: full tank ---
 
 @router.callback_query(F.data.startswith(FUEL_FULL_TANK_PREFIX), AddFuelStates.full_tank)
 async def callback_full_tank(callback: CallbackQuery, state: FSMContext) -> None:
     is_full = callback.data.endswith("yes")
     await state.update_data(full_tank=is_full)
+    await state.set_state(AddFuelStates.note)
+    await callback.answer()
+    await _ask_note(callback.message, state, edit=True)
+
+
+# --- Step 10: note ---
+
+@router.callback_query(F.data == FUEL_NOTE_SKIP, AddFuelStates.note)
+async def callback_note_skip(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(note=None)
     await state.set_state(AddFuelStates.confirm)
     await callback.answer()
     await _show_confirm(callback.message, state, callback.from_user.id, edit=True)
 
 
-# --- Step 9: confirmation ---
+@router.message(AddFuelStates.note)
+async def process_note(message: Message, state: FSMContext) -> None:
+    note = (message.text or "").strip()
+    if not note:
+        await message.answer("Напиши примітку текстом або натисни «Пропустити».")
+        return
+    if len(note) > NOTE_MAX_LENGTH:
+        await message.answer(
+            f"⚠️ Примітка задовга ({len(note)} символів). "
+            f"Максимум — {NOTE_MAX_LENGTH}. Скороти, будь ласка."
+        )
+        return
+
+    await clear_tracked_prompt(message.bot, state)
+    await state.update_data(note=note)
+    await state.set_state(AddFuelStates.confirm)
+    await _show_confirm(message, state, message.from_user.id)
+
+
+# --- Step 11: confirmation ---
 
 @router.callback_query(F.data == FUEL_CONFIRM_SAVE, AddFuelStates.confirm)
 async def callback_save(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     user_id = callback.from_user.id
     car_id = data.get("car_id") or (await db.get_active_car(user_id)).id
-    previous = await db.get_previous_refuel(user_id, car_id, data["odometer_km"])
 
-    await db.add_refuel(
+    record_id = await db.add_refuel(
         user_id,
         car_id=car_id,
         refuel_date=data["refuel_date"],
@@ -725,13 +962,15 @@ async def callback_save(callback: CallbackQuery, state: FSMContext) -> None:
         fuel_type=data["fuel_type"],
         station_name=data.get("station_name"),
         full_tank=data.get("full_tank", False),
+        note=data.get("note"),
+        discount=data.get("discount", 0.0),
     )
 
     settings = await db.ensure_user(user_id)
     await state.clear()
     await callback.answer("Збережено")
 
-    text = _format_save_summary(data, settings.currency, previous)
+    text = await build_save_summary(user_id, car_id, record_id, data, settings.currency)
     await safe_edit_text(
         callback.message,
         text,
@@ -763,6 +1002,8 @@ async def add_fuel_hint(message: Message, state: FSMContext) -> None:
         AddFuelStates.car_pick.state: "обери авто кнопкою",
         AddFuelStates.refuel_date.state: "обери варіант кнопкою",
         AddFuelStates.fuel_type.state: "обери тип пального кнопкою",
+        AddFuelStates.price_mode.state: "обери «Сума чека» або «Ціна за літр» кнопкою",
+        AddFuelStates.discount.state: "обери варіант знижки кнопкою",
         AddFuelStates.full_tank.state: "обери «Так» або «Ні» кнопкою",
         AddFuelStates.confirm.state: "підтвердь або скасуй кнопкою",
     }

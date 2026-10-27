@@ -7,11 +7,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from database import RefuelRecord
-from services.calculations import TripStats, calc_full_trip_stats
-from services.formatting import fmt_date, fmt_num, html_escape
+from services.calculations import TripStats, format_date
+from services.formatting import fmt_date, fmt_num, fmt_total, html_escape
 
 
 FIRST_REFUEL_NOTE = "ℹ️ Це перша заправка — немає попередніх даних"
+
+PARTIAL_TANK_NOTE = "Неповний бак — витрату порахую на наступному повному баку."
+
+NO_PREVIOUS_FULL_NOTE = (
+    "Повний бак, але немає попереднього повного бака з меншим пробігом — "
+    "витрату порахую від цього бака до наступного."
+)
 
 EMPTY_HISTORY_TEXT = (
     "📜 <b>Історія</b>\n\n"
@@ -59,35 +66,57 @@ def _fuel_line(record: RefuelRecord) -> str:
 def format_trip_analysis_lines(
     record: RefuelRecord,
     previous: RefuelRecord | None,
+    trip: TripStats | None,
     currency: str,
     *,
     header: str = "З попередньої заправки:",
     show_first_note: bool = True,
 ) -> list[str]:
-    """Build the shared trip-analysis block between two fuel entries.
+    """Build the shared trip-analysis block for one fuel entry.
 
-    Used by last-refuel and history views.
+    Consumption comes from the full-to-full method (see calc_full_tank_trips), so
+    partial fill-ups show only the distance and a hint instead of a misleading number.
 
     Args:
         record: Current fuel entry.
-        previous: Preceding fuel entry, if any.
+        previous: Chronologically preceding fuel entry, if any.
+        trip: Full-tank segment ending at this entry, if any.
         currency: Currency code for cost lines.
-        header: Section heading (Ukrainian user-facing string).
+        header: Section heading for a segment from the immediately preceding refuel.
         show_first_note: When True, show a note if there is no previous entry.
 
     Returns:
-        List of HTML lines; may be empty when trip stats are not computable.
+        List of HTML lines; may be empty.
     """
     if previous is None:
-        if show_first_note:
-            return ["", FIRST_REFUEL_NOTE]
-        return []
+        return ["", FIRST_REFUEL_NOTE] if show_first_note else []
 
-    trip = calc_full_trip_stats(record, previous)
-    if trip is None:
-        return []
+    if trip is not None:
+        if trip.refuels_count > 1 and trip.since is not None:
+            header = (
+                f"Від повного бака {format_date(trip.since)} "
+                f"({trip.refuels_count} {_refuels_word(trip.refuels_count)}):"
+            )
+        return _trip_stats_to_lines(trip, currency, header=header)
 
-    return _trip_stats_to_lines(trip, currency, header=header)
+    lines = [""]
+    distance = record.odometer_km - previous.odometer_km
+    if distance > 0:
+        lines.append(f"📏 Проїхав від попередньої: {fmt_num(distance, 0)} км")
+    if record.full_tank:
+        lines.append(f"ℹ️ {NO_PREVIOUS_FULL_NOTE}")
+    else:
+        lines.append(f"ℹ️ {PARTIAL_TANK_NOTE}")
+    return lines
+
+
+def _refuels_word(count: int) -> str:
+    """Ukrainian plural of "заправка" for a count."""
+    if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
+        return "заправки"
+    if count % 10 == 1 and count % 100 != 11:
+        return "заправка"
+    return "заправок"
 
 
 def _trip_stats_to_lines(trip: TripStats, currency: str, *, header: str) -> list[str]:
@@ -102,34 +131,6 @@ def _trip_stats_to_lines(trip: TripStats, currency: str, *, header: str) -> list
     ]
 
 
-def format_trip_from_previous_lines(
-    record: RefuelRecord,
-    previous: RefuelRecord | None,
-    currency: str,
-    *,
-    style: str = "full",
-) -> list[str]:
-    """Backward-compatible wrapper around format_trip_analysis_lines.
-
-    Args:
-        record: Current fuel entry.
-        previous: Preceding fuel entry, if any.
-        currency: Currency code for cost lines.
-        style: ``"compact"`` uses a shorter header; ``"full"`` uses the default.
-
-    Returns:
-        Trip analysis lines from format_trip_analysis_lines.
-    """
-    if style == "compact":
-        return format_trip_analysis_lines(
-            record,
-            previous,
-            currency,
-            header="З попередньої:",
-        )
-    return format_trip_analysis_lines(record, previous, currency)
-
-
 def _basic_record_lines(record: RefuelRecord, currency: str) -> list[str]:
     """Core field lines for a single fuel entry (date, station, fuel, amounts)."""
     lines = [
@@ -140,9 +141,11 @@ def _basic_record_lines(record: RefuelRecord, currency: str) -> list[str]:
     lines.extend([
         f"🧾 {_fuel_line(record)}",
         f"🔢 {fmt_num(record.liters)} л",
-        f"💵 {fmt_num(record.price_per_liter)} {currency}/л",
-        f"💰 {fmt_num(record.total_price, 0)} {currency}",
+        f"💵 {fmt_num(record.price_per_liter, 2)} {currency}/л",
+        f"💰 {fmt_total(record.total_price, record.discount, currency)}",
     ])
+    if record.note:
+        lines.append(f"📝 {html_escape(record.note)}")
     return lines
 
 
@@ -153,6 +156,7 @@ def format_history_record(
     *,
     number: int,
     extended_history: bool = False,
+    trip: TripStats | None = None,
 ) -> str:
     """Format one history list entry (#1 = newest).
 
@@ -162,6 +166,7 @@ def format_history_record(
         currency: Currency code for amounts.
         number: Display index (1-based, newest first).
         extended_history: When True, append trip analysis from the previous entry.
+        trip: Full-tank segment ending at this entry (see calc_full_tank_trips).
 
     Returns:
         Multi-line HTML string for the entry.
@@ -178,6 +183,7 @@ def format_history_record(
             format_trip_analysis_lines(
                 record,
                 previous,
+                trip,
                 currency,
                 header="З попередньої:",
             )
@@ -195,6 +201,7 @@ def format_history_page(
     *,
     per_page: int = HISTORY_PER_PAGE,
     extended_history: bool = False,
+    trips: dict[int, TripStats] | None = None,
 ) -> HistoryPageResult:
     """Build one paginated history page and navigation flags.
 
@@ -225,6 +232,7 @@ def format_history_page(
                 currency,
                 number=number,
                 extended_history=extended_history,
+                trip=(trips or {}).get(record.id),
             )
         )
 
@@ -238,13 +246,19 @@ def format_history_page(
     )
 
 
-def format_last_refuel(record: RefuelRecord, previous: RefuelRecord | None, currency: str) -> str:
+def format_last_refuel(
+    record: RefuelRecord,
+    previous: RefuelRecord | None,
+    currency: str,
+    trip: TripStats | None = None,
+) -> str:
     """Format the detailed last fuel entry card with trip analysis.
 
     Args:
         record: Most recent fuel entry.
-        previous: Preceding entry for consumption and cost since last fill-up.
+        previous: Preceding entry, for the distance since the last fill-up.
         currency: Currency code for amounts.
+        trip: Full-tank segment ending at this entry, if any.
 
     Returns:
         Multi-line HTML string for the last-refuel view.
@@ -261,10 +275,12 @@ def format_last_refuel(record: RefuelRecord, previous: RefuelRecord | None, curr
     lines.extend([
         f"🧾 Пальне: {_fuel_line(record)}",
         f"🔢 Літри: {fmt_num(record.liters)} л",
-        f"💰 Сума: {fmt_num(record.total_price, 0)} {currency}",
+        f"💰 Сума: {fmt_total(record.total_price, record.discount, currency)}",
         f"🚗 Пробіг: {fmt_num(record.odometer_km, 0)} км",
-        f"💵 Ціна/л: {fmt_num(record.price_per_liter)} {currency}",
+        f"💵 Ціна/л: {fmt_num(record.price_per_liter, 2)} {currency}",
         f"🛢 Повний бак: {full_tank}",
     ])
-    lines.extend(format_trip_analysis_lines(record, previous, currency))
+    if record.note:
+        lines.append(f"📝 Примітка: {html_escape(record.note)}")
+    lines.extend(format_trip_analysis_lines(record, previous, trip, currency))
     return "\n".join(lines)

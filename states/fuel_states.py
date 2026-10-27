@@ -1,4 +1,4 @@
-"""FSM state groups for add-fuel, settings, cars, and AI import flows."""
+"""FSM state groups for add-fuel (manual and photo), settings, cars, and AI import flows."""
 
 from aiogram.fsm.state import State, StatesGroup
 
@@ -18,9 +18,24 @@ class AddFuelStates(StatesGroup):
     fuel_product_custom = State()
     liters = State()
     price_mode = State()
+    price_per_liter = State()
     total_price = State()
+    discount = State()
+    discount_amount = State()
+    discount_per_liter = State()
     full_tank = State()
+    note = State()
     confirm = State()
+
+
+class PhotoFuelStates(StatesGroup):
+    """States for adding one refuel from receipt / dashboard photos via AI."""
+
+    await_input = State()
+    clarify = State()
+    preview = State()
+    note = State()
+    car_pick = State()
 
 
 class SettingsStates(StatesGroup):

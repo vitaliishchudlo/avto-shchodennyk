@@ -6,6 +6,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 import database as db
+from handlers.archive import hidden_years_banner
 from handlers.callback_guard import safe_callback, show_or_edit
 from keyboards.main_menu import (
     HISTORY_EXPORT,
@@ -15,6 +16,7 @@ from keyboards.main_menu import (
     history_empty_keyboard,
     history_keyboard,
 )
+from services.calculations import calc_full_tank_trips
 from services.csv_export import csv_filename, export_refuels_to_csv
 from services.formatting import active_car_banner, code, html_escape
 from services.history_format import (
@@ -26,13 +28,26 @@ from services.history_format import (
 
 router = Router()
 
+ALL_ARCHIVED_TEXT = (
+    "📜 <b>Історія</b>\n\n"
+    "Усі роки з заправками приховано в архіві.\n"
+    "Показати їх можна в «⚙️ Налаштування» → «🗄 Архів років»."
+)
+
 
 async def _show_history(target: Message, user_id: int, page: int, *, edit: bool = False) -> None:
-    """Render one page of refuel history for the active car."""
+    """Render one page of refuel history for the active car, without archived years."""
     car = await db.get_active_car(user_id)
-    total = await db.count_refuels(user_id, car.id)
+    all_refuels = await db.get_all_refuels(user_id, car.id, ascending=True)
+    hidden = await db.get_hidden_years(car.id)
+    visible = [r for r in reversed(all_refuels) if r.date.year not in hidden]
+    banner = active_car_banner(car.name) + hidden_years_banner(
+        {r.date.year for r in all_refuels} & hidden
+    )
+
+    total = len(visible)
     if total == 0:
-        text = active_car_banner(car.name) + "\n" + EMPTY_HISTORY_TEXT
+        text = banner + "\n" + (ALL_ARCHIVED_TEXT if all_refuels else EMPTY_HISTORY_TEXT)
         await show_or_edit(
             target,
             text,
@@ -44,9 +59,10 @@ async def _show_history(target: Message, user_id: int, page: int, *, edit: bool 
     total_pages = (total + HISTORY_PER_PAGE - 1) // HISTORY_PER_PAGE
     page = max(0, min(page, total_pages - 1))
 
-    refuels = await db.get_refuels_page(user_id, car.id, page, HISTORY_PER_PAGE)
+    refuels = visible[page * HISTORY_PER_PAGE:(page + 1) * HISTORY_PER_PAGE]
     settings = await db.ensure_user(user_id)
-    all_refuels = await db.get_all_refuels(user_id, car.id, ascending=True)
+    # Previous entries and trips come from the full history: archived years still
+    # hold the tank the first visible refuel continues from
     prev_map = build_prev_map(all_refuels)
 
     result = format_history_page(
@@ -57,9 +73,10 @@ async def _show_history(target: Message, user_id: int, page: int, *, edit: bool 
         settings.currency,
         per_page=HISTORY_PER_PAGE,
         extended_history=settings.extended_history,
+        trips=calc_full_tank_trips(all_refuels),
     )
 
-    text = active_car_banner(car.name) + "\n" + result.text
+    text = banner + "\n" + result.text
     keyboard = history_keyboard(page, total_pages)
     await show_or_edit(target, text, edit=edit, reply_markup=keyboard)
 

@@ -26,7 +26,7 @@ def _settings_text(settings: db.UserSettings, active_name: str) -> str:
     ext_label = "увімкнено" if settings.extended_history else "вимкнено"
     return (
         "⚙️ <b>Налаштування</b>\n\n"
-        "Тут можна змінити авто, валюту та вигляд історії, "
+        "Тут можна змінити авто, валюту та вигляд історії, сховати старі роки в архів, "
         "а також імпортувати старі заправки через AI.\n\n"
         f"🚗 Активне авто: <b>{html_escape(active_name)}</b>\n"
         f"💱 Валюта: <b>{settings.currency}</b>\n"

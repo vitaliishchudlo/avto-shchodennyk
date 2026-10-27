@@ -8,6 +8,7 @@ from aiogram.types import CallbackQuery, Message
 
 import database as db
 from handlers.callback_guard import safe_callback, show_or_edit
+from handlers.filters import NotForeignCommand
 from keyboards.cars import (
     CARS_ADD,
     CARS_ADD_ACTIVE_NO,
@@ -31,6 +32,7 @@ from services.formatting import html_escape
 from states.fuel_states import CarStates
 
 router = Router()
+router.message.filter(NotForeignCommand())
 
 
 async def _show_cars_menu(target: Message, user_id: int, *, edit: bool = False) -> None:
